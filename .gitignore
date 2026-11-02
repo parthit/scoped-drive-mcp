@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+credentials*.json
+service-account*.json
+client_secret*.json
+token*.json
+*-sa-key.json
+
+# Vercel
+.vercel/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
