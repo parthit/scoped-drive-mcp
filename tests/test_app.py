@@ -1,0 +1,151 @@
+"""In-process smoke tests of the ASGI app (no lifespan, like a serverless runtime)."""
+
+import json
+
+import httpx
+import pytest
+
+from scoped_drive_mcp.server import build_app
+from tests.conftest import TOKENS
+
+MCP_HEADERS = {
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+}
+
+INIT = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "pytest", "version": "0"},
+    },
+}
+
+
+def rpc(method: str, params: dict | None = None, id_: int = 2) -> dict:
+    msg: dict = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        msg["params"] = params
+    return msg
+
+
+def auth(role: str) -> dict:
+    return {**MCP_HEADERS, "Authorization": f"Bearer {TOKENS[role]}"}
+
+
+@pytest.fixture
+async def client(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://example.vercel.app") as c:
+        yield c
+
+
+@pytest.mark.anyio
+async def test_health_needs_no_auth(client, drive) -> None:
+    r = await client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+    assert drive.get_calls == [] and drive.queries == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        MCP_HEADERS,
+        {**MCP_HEADERS, "Authorization": "Bearer wrong-token"},
+        {**MCP_HEADERS, "Authorization": "Basic dXNlcjpwYXNz"},
+        {**MCP_HEADERS, "Authorization": ""},
+    ],
+)
+async def test_mcp_rejects_missing_or_invalid_token(client, headers) -> None:
+    r = await client.post("/mcp", json=INIT, headers=headers)
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("Bearer")
+    r = await client.get("/mcp", headers=headers)
+    assert r.status_code == 401
+
+
+async def _initialize(client, role: str) -> None:
+    r = await client.post("/mcp", json=INIT, headers=auth(role))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["result"]["serverInfo"]["name"] == "scoped-drive"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("role", "count"), [("viewer", 4), ("editor", 9), ("admin", 10)])
+async def test_initialize_and_list_tools(client, role: str, count: int) -> None:
+    await _initialize(client, role)
+    r = await client.post("/mcp", json=rpc("tools/list"), headers=auth(role))
+    assert r.status_code == 200, r.text
+    tools = {t["name"] for t in r.json()["result"]["tools"]}
+    assert len(tools) == count
+    assert "read_file" in tools
+    assert ("trash_file" in tools) == (role == "admin")
+
+
+@pytest.mark.anyio
+async def test_tool_calls_over_http(client) -> None:
+    await _initialize(client, "viewer")
+    call = rpc("tools/call", {"name": "read_file", "arguments": {"file_id": "notes-txt"}})
+    r = await client.post("/mcp", json=call, headers=auth("viewer"))
+    result = r.json()["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"]["content"] == "plan notes inside"
+
+    call = rpc("tools/call", {"name": "read_file", "arguments": {"file_id": "outside-file"}})
+    result = (await client.post("/mcp", json=call, headers=auth("viewer"))).json()["result"]
+    assert result["isError"] is True
+    assert "Forbidden" in result["content"][0]["text"]
+    assert "outside plan" not in json.dumps(result)
+
+    call = rpc("tools/call", {"name": "trash_file", "arguments": {"file_id": "notes-txt"}})
+    result = (await client.post("/mcp", json=call, headers=auth("viewer"))).json()["result"]
+    assert result["isError"] is True
+    assert "Permission denied" in result["content"][0]["text"]
+
+
+@pytest.mark.anyio
+async def test_principal_does_not_leak_between_requests(client) -> None:
+    await _initialize(client, "admin")
+    r = await client.post("/mcp", json=rpc("tools/list"), headers=auth("viewer"))
+    assert len(r.json()["result"]["tools"]) == 4
+
+
+def test_starlette_testclient_with_lifespan(app) -> None:
+    from starlette.testclient import TestClient
+
+    with TestClient(app, base_url="https://example.vercel.app") as tc:
+        assert tc.get("/health").status_code == 200
+        assert tc.post("/mcp", json=INIT, headers=MCP_HEADERS).status_code == 401
+        r = tc.post("/mcp", json=INIT, headers=auth("editor"))
+        assert r.status_code == 200
+        r = tc.post("/mcp", json=rpc("tools/list"), headers=auth("editor"))
+        assert len(r.json()["result"]["tools"]) == 9
+
+
+@pytest.mark.anyio
+async def test_misconfigured_app_health(monkeypatch) -> None:
+    for name in (
+        "ROOT_FOLDER_ID",
+        "API_TOKENS",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_REFRESH_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "do-not-leak-this")
+    app = build_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/health")
+        assert r.status_code == 503
+        assert r.json()["status"] == "misconfigured"
+        assert "do-not-leak-this" not in r.text
+        settings = {p["setting"] for p in r.json()["problems"]}
+        assert {"ROOT_FOLDER_ID", "API_TOKENS"} <= settings
+        assert (await c.post("/mcp", json=INIT)).status_code == 503
