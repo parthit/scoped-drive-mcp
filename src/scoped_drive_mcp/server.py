@@ -74,6 +74,7 @@ def create_mcp(service: DriveService) -> ScopedFastMCP:
         stateless_http=True,
         json_response=True,
         streamable_http_path=MCP_PATH,
+        log_level="WARNING",
         # Requests are authenticated with bearer tokens and the server is reached through
         # a public hostname, so the localhost-only Host check would just reject them.
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
