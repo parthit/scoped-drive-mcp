@@ -3,11 +3,11 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
+      "includeFiles": "src/scoped_drive_mcp/templates/**",
       "excludeFiles": "{tests/**,docs/**,scripts/**,.venv/**,**/__pycache__/**}"
     }
   },
   "rewrites": [
-    { "source": "/mcp", "destination": "/api/index" },
-    { "source": "/health", "destination": "/api/index" }
+    { "source": "/(.*)", "destination": "/api/index" }
   ]
 }
