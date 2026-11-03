@@ -35,6 +35,8 @@ from .auth import BearerAuthMiddleware, current_principal
 from .config import Settings
 from .dashboard import DashboardContext, build_dashboard, render_plain
 from .drive_client import (
+    BOT_NOT_CONNECTED,
+    OWNER_NOT_SIGNED_IN,
     BotNotConnectedError,
     DriveClient,
     GoogleDriveClient,
@@ -358,6 +360,9 @@ def build_app(
             settings.env_bot_refresh_token,
             stored_bot_token,
             bot_drive_factory or _bot_factory(settings),
+            not_connected_message=(
+                OWNER_NOT_SIGNED_IN if settings.same_account else BOT_NOT_CONNECTED
+            ),
         )
 
     if guard_factory is None:

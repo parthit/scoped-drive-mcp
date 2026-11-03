@@ -204,7 +204,8 @@ def test_connect_bot_flow_and_mcp_uses_stored_token(no_env_bot_app, memstore, wo
     assert health["bot_connected"] is False and health["owner_connected"] is True
     # before connecting, tools explain that the bot is missing
     result = mcp_call(c, "read_file", file_id="loose-doc")
-    assert result["isError"] and "not connected" in result["content"][0]["text"]
+    text = result["content"][0]["text"]
+    assert result["isError"] and "not connected" in text and "Connect bot" in text
 
     state = start_oauth(c, "/connect-bot", csrf=csrf(c, "/connect-bot"))
     r = c.get("/auth/callback", params={"code": "bot-code", "state": state})

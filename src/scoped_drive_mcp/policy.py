@@ -137,12 +137,9 @@ def require(
             except ToolError as exc:
                 audit(tool=tool, decision="error", reason=str(exc), **who, **ids)
                 raise
-            except BotNotConnectedError:
+            except BotNotConnectedError as exc:
                 audit(tool=tool, decision="error", reason="bot_not_connected", **who, **ids)
-                raise ToolError(
-                    "The Drive bot account is not connected yet. Ask the owner to open the "
-                    "dashboard and use 'Connect bot'."
-                ) from None
+                raise ToolError(exc.user_message) from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)

@@ -31,8 +31,22 @@ class DriveNotFoundError(Exception):
     """The file does not exist or the identity cannot see it."""
 
 
+BOT_NOT_CONNECTED = (
+    "The Drive bot account is not connected yet. Ask the owner to open the "
+    "dashboard and use 'Connect bot'."
+)
+OWNER_NOT_SIGNED_IN = (
+    "The owner has not signed in to the dashboard yet. Ask the owner to open the "
+    "dashboard and sign in with Google."
+)
+
+
 class BotNotConnectedError(Exception):
     """No refresh token for the bot account (neither env var nor dashboard connection)."""
+
+    def __init__(self, detail: str = "", user_message: str = BOT_NOT_CONNECTED):
+        super().__init__(detail or user_message)
+        self.user_message = user_message
 
 
 class DriveClient(Protocol):
@@ -284,7 +298,9 @@ class LazyBotDriveClient:
         factory: Callable[[str], DriveClient],
         ttl: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        not_connected_message: str = BOT_NOT_CONNECTED,
     ):
+        self._not_connected_message = not_connected_message
         self._env_token = env_token
         self._stored_token = stored_token
         self._factory = factory
@@ -313,7 +329,9 @@ class LazyBotDriveClient:
     def _inner(self) -> DriveClient:
         token = self.current_token()
         if not token:
-            raise BotNotConnectedError("the bot account is not connected")
+            raise BotNotConnectedError(
+                "the bot account is not connected", self._not_connected_message
+            )
         with self._lock:
             if self._client is not None and self._client[0] == token:
                 return self._client[1]

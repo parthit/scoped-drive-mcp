@@ -81,7 +81,13 @@ def test_tools_use_the_owner_token(c, same_app) -> None:
 def test_tools_need_the_owner_signed_in_once(same_app) -> None:
     c = client(same_app)
     result = mcp_call(c, "read_file", file_id="loose-doc")
-    assert result["isError"] and "not connected" in result["content"][0]["text"]
+    text = result["content"][0]["text"]
+    assert result["isError"] and "owner has not signed in" in text
+    assert "Connect bot" not in text
+
+    login(c)
+    post(c, "/grant", file_id="loose-doc")
+    assert mcp_call(c, "read_file", file_id="loose-doc")["isError"] is False
 
 
 def test_env_refresh_token_still_wins(world, memstore, oauth) -> None:
