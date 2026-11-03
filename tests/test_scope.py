@@ -8,6 +8,7 @@ from scoped_drive_mcp.scope import (
     ScopeGuard,
     escape_query_value,
 )
+from scoped_drive_mcp.service import DriveService
 from tests.conftest import ROOT
 from tests.fake_drive import compile_query
 
@@ -202,6 +203,22 @@ def test_trashed_allowlisted_folder_drops_descendants(drive, clock) -> None:
     assert not guard.is_in_scope("notes-txt")
     assert guard.folders_in_scope() == ()
     assert guard.search("plan", 50, fields="id") == []
+
+
+def test_trashed_allowlisted_folder_is_hidden_as_a_parent(drive, clock, settings) -> None:
+    """A file granted on its own stays readable, but its trashed allowlisted parent is not shown."""
+    drive.files[ROOT].trashed = True
+    guard = ScopeGuard(
+        drive,
+        None,
+        ttl=60,
+        clock=clock,
+        allowlist=lambda: {ROOT: FOLDER_MIME, "sub-a": FOLDER_MIME},
+    )
+    assert guard.is_in_scope("sub-a")
+    assert not guard.parent_in_scope(ROOT)
+    meta = DriveService(drive, guard, settings).get_metadata("sub-a")
+    assert "parents" not in meta
 
 
 @pytest.mark.parametrize("alias", ["root", "appDataFolder"])

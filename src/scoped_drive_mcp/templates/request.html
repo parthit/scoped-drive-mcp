@@ -35,6 +35,9 @@
       {% endfor %}
       <button class="primary" type="submit">Approve</button>
     </form>
+    {% elif owner_meta %}
+    <p class="muted">Your whole My Drive can't be shared. Deny this request, or
+      <a href="/browse?request={{ req.id }}">pick a different item</a>.</p>
     {% else %}
     <p class="muted">This item isn't in your Drive (or you can't see it), so it can't be shared from here.
       You can deny the request, or <a href="/browse?request={{ req.id }}">pick a different item</a>.</p>

@@ -265,7 +265,9 @@ class ScopeGuard:
         allowed item). Ids outside the scope would leak the owner's folder structure."""
         allowed = self.allowed()
         if parent_id in allowed:
-            return True
+            # Same rule as the scope walk: a trashed allowlisted folder, or an id Drive
+            # rewrites to a different item, must not be shown as an in-scope parent.
+            return not self._allowlisted_anchor_unusable(parent_id)
         ref = self._ancestor(parent_id)
         if ref is None or ref.trashed or ref.id != parent_id:
             return False

@@ -158,6 +158,8 @@ def test_my_drive_root_itself_cannot_be_approved(c, world, p2_app) -> None:
     path = payload["approval_url"].removeprefix(BASE_URL)
     page = c.get(path).text
     assert "Share just this item" not in page and "pick a different item" in page
+    assert "whole My Drive can't be shared" in page
+    assert "isn't in your Drive" not in page
     post(c, f"{path}/approve", target_id="owner-root")
     assert p2_app.state.dashboard.allowlist.entries() == {}
     assert requests_of(p2_app).get(payload["request_id"]).status == "pending"
