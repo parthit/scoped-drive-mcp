@@ -159,6 +159,8 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
         assert settings == {"API_TOKENS"}
         assert (await c.post("/mcp", json=INIT)).status_code == 503
         assert (await c.get("/browse")).status_code == 503
+        assert (await c.get("/terms")).status_code == 200
+        assert (await c.get("/privacy")).status_code == 200
 
 
 @pytest.mark.anyio
@@ -208,6 +210,9 @@ async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, 
         for path in ("/", "/browse", "/login"):
             page = await c.get(path)
             assert page.status_code == 503 and "Redis is not configured" in page.text
+        for path in ("/terms", "/privacy"):
+            page = await c.get(path)
+            assert page.status_code == 200 and "Google Drive" in page.text
     assert drive.get_calls == [] and drive.queries == []
 
 

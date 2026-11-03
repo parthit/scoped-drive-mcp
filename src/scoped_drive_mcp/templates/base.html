@@ -56,6 +56,9 @@
   .crumbs span.sep { color:var(--muted); margin:0 6px; }
   code { background:#eef1f6; padding:1px 5px; border-radius:4px; font-size:13px; }
   .icon { width:1.4em; display:inline-block; }
+  footer { max-width:1040px; margin:0 auto; padding:8px 20px 32px; color:var(--muted); font-size:13px; }
+  footer a { color:var(--muted); margin-right:14px; text-decoration:none; }
+  footer a:hover { color:var(--fg); }
 </style>
 </head>
 <body>
@@ -86,5 +89,10 @@
   {% endfor %}
   {% block content %}{% endblock %}
 </main>
+<footer>
+  <a href="/privacy">Privacy</a>
+  <a href="/terms">Terms</a>
+  {% if not owner %}<a href="/login">Sign in</a>{% endif %}
+</footer>
 </body>
 </html>

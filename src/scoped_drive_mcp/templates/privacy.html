@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Privacy{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Privacy</h1>
+  <p>Scoped Drive is a gateway in front of Google Drive. Drive’s API has no fine-grained
+     control for sharing only selected files and folders with an app, so this server asks
+     for broad Drive access and then enforces the list you tick yourself.</p>
+  <p>This deployment is run by the person who set it up. The only Google account that can
+     open the dashboard is the owner account configured for it.</p>
+
+  <h2>Google data we use</h2>
+  <p>When you sign in, Google tells us the account’s email address and whether that email
+     is verified. We use that only to check that the account is the configured owner, or,
+     if you connect a separate bot account, that bot account. We do not ask for your name,
+     contacts, or other profile information.</p>
+  <p>Sign-in also requests full Google Drive access
+     (<code>https://www.googleapis.com/auth/drive</code>). We request that scope because
+     Drive does not offer a permission for “only these files and folders.” After you
+     approve it, this server applies its own limit: an assistant can only list, read, or
+     change items you have ticked, or items inside a folder you have ticked.</p>
+  <p>What an assistant can do depends on the role of the connection you gave it. That can
+     include search, reading text, creating files and folders, editing, renaming, and
+     moving an item to Drive’s trash. There is no tool here to permanently delete a file,
+     to change who a file is shared with, or to move a file between folders.</p>
+
+  <h2>How a call reaches Drive</h2>
+  <p>In the usual setup, a second Google account (the bot) is the identity the assistant’s
+     tools use. Ticking an item shares that item with the bot in Drive, using your own
+     sign-in. The bot cannot see the rest of your Drive, and this server still checks the
+     list before each call.</p>
+  <p>You can instead run in same-account mode. The tools then use your own sign-in, and
+     the only limit is this server’s list. The dashboard shows which mode is active.</p>
+  <p>File contents are read from Drive only to answer a tool call, then returned to the
+     assistant. This server does not keep a copy of file contents.</p>
+
+  <h2>What we store</h2>
+  <p>We store:</p>
+  <ul>
+    <li>Your Google refresh token, encrypted, so the server can keep calling Drive after
+        you close the browser. It lives in Redis (Upstash).</li>
+    <li>The allowlist: the Drive file and folder ids you ticked.</li>
+    <li>Access requests, kept for 7 days: a request id, the file id, a short description,
+        the tool name, the connection name, your decision, and the file name only when the
+        bot can already see that file.</li>
+    <li>An activity log of the last 500 events: time, tool name, allow or deny, and ids.
+        File contents, file names, and search text are not written there. The same lines
+        go to the host’s logs.</li>
+    <li>A signed session cookie in your browser for the dashboard, lasting about 8 hours.
+        It does not contain your files.</li>
+    <li>If an assistant connects with OAuth: the name it registered and the tokens issued
+        for that connection, so you can disconnect it.</li>
+  </ul>
+
+  <h2>Who receives it</h2>
+  <p>Google holds your files and handles sign-in. The assistant you connect (for example
+     Grok) receives the tool results for items you allowed, including file text when it
+     reads a file. What that assistant stores is covered by its own policy.</p>
+  <p>The app runs on Vercel. The encrypted token, allowlist, requests, and activity log
+     are stored in Upstash Redis. Those providers keep that data so the gateway can run.
+     They are not given your Drive as a product of their own.</p>
+  <p>We do not sell Google user data. We do not use it for advertising, and we do not use
+     it to train a model. Google user data is used only to run this gateway: check the
+     list you set, call Drive for the items you allowed, and return the result to the
+     assistant you connected. It is not passed to anyone else, except to keep the
+     service secure or if the law requires it. This server has no page that shows file
+     contents, and the activity log does not contain them.</p>
+
+  <h2>Your choices</h2>
+  <p>Sign out, untick items, disconnect the bot or the assistant, or remove this app’s
+     access in your Google Account settings. Removing it stops this server from using the
+     stored Google sign-in. Clearing this deployment’s Redis data removes the stored
+     token, allowlist, and requests.</p>
+  <p>Questions about a deployment go to the person who runs it, the Google account
+     configured as its owner. See also the <a href="/terms">terms</a>.</p>
+  <p class="muted">Last updated November 3, 2026.</p>
+</div>
+{% endblock %}

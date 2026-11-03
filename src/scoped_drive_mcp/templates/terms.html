@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Terms{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Terms</h1>
+  <p>Scoped Drive is a gateway that sits in front of Google Drive.</p>
+  <p>Drive’s API does not give an app a fine-grained way to share only certain files and
+     folders. An app that signs in is handed a broad Drive permission: the whole Drive of
+     the account that approved it, or only files that app itself created. There is no
+     Drive setting for “this app may use these folders through the API, and nothing else.”</p>
+  <p>This server is that control. You sign in, tick the files and folders an assistant may
+     use, and every API call is checked against that list before it reaches Drive. Anything
+     else is refused. If the assistant asks for something you have not allowed, you get an
+     approval link and can allow or deny it. You can untick an item at any time.</p>
+  <p>Only the Google account configured as the owner of this deployment can sign in to the
+     dashboard. An assistant reaches Drive only with a connection that owner created, and
+     only for the items that owner allowed.</p>
+  <h2>Using it</h2>
+  <p>Signing in, or connecting an assistant, means you are the owner of this deployment or
+     you are using it with that owner’s permission. Use it for your own Drive. Do not use
+     it to reach files that are not yours.</p>
+  <p>The assistant you connect receives the contents of files you allowed. That is what the
+     gateway is for. What the assistant does with those contents is covered by the
+     assistant’s own terms.</p>
+  <p>You can untick items in the dashboard, disconnect the assistant, and remove this app’s
+     access from your Google Account. Doing that stops further use. It does not recall
+     anything an assistant has already received.</p>
+  <p>The service is a personal tool. It can be unavailable when its host, its database, or
+     Google is unavailable. Your files stay in Google Drive. This server does not keep a
+     copy of them.</p>
+  <p>Scoped Drive is not made by Google, and these terms are not Google’s terms.
+     <a href="/privacy">Privacy</a> describes what is stored.</p>
+  <p class="muted">Last updated November 3, 2026.</p>
+</div>
+{% endblock %}

@@ -213,6 +213,22 @@ def render_plain(template: str, status_code: int = 200, **ctx: Any) -> HTMLRespo
     return HTMLResponse(html, status_code=status_code)
 
 
+async def terms_page(_: Request) -> Response:
+    return render_plain("terms.html")
+
+
+async def privacy_page(_: Request) -> Response:
+    return render_plain("privacy.html")
+
+
+def legal_routes() -> list[Route]:
+    """Public /terms and /privacy. Google's OAuth screen links here with no session."""
+    return [
+        Route("/terms", terms_page, methods=["GET"]),
+        Route("/privacy", privacy_page, methods=["GET"]),
+    ]
+
+
 def is_owner(request: Request, settings: Settings) -> bool:
     owner = request.session.get("owner")
     return bool(owner) and owner == settings.owner_email
@@ -230,7 +246,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render_plain("setup.html", status_code=503, missing=missing)
 
         return Starlette(
-            routes=[Route("/{path:path}", not_configured, methods=["GET", "POST"])],
+            routes=[
+                *legal_routes(),
+                Route("/{path:path}", not_configured, methods=["GET", "POST"]),
+            ],
             middleware=[Middleware(SecurityHeadersMiddleware)],
         )
 
@@ -803,6 +822,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
+        *legal_routes(),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     return Starlette(

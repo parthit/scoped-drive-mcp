@@ -66,6 +66,20 @@ def test_login_page_is_public(c) -> None:
     assert r.status_code == 200 and "Sign in with Google" in r.text
     assert r.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
+
+
+@pytest.mark.parametrize(
+    ("path", "needle"),
+    [("/terms", "gateway that sits in front of Google Drive"), ("/privacy", "allowlist")],
+)
+def test_legal_pages_are_public(c, path: str, needle: str) -> None:
+    r = c.get(path)
+    assert r.status_code == 200
+    assert needle in r.text
+    assert "set-cookie" not in {name.lower() for name in r.headers}
+    assert r.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
 
 
 # ---- owner sign-in ---------------------------------------------------------------
@@ -446,5 +460,7 @@ def test_dashboard_not_configured(world) -> None:
     r = c.get("/")
     assert r.status_code == 503
     assert "SESSION_SECRET" in r.text and "OWNER_EMAIL" in r.text
+    assert c.get("/terms").status_code == 200
+    assert c.get("/privacy").status_code == 200
     health = c.get("/health").json()
     assert {"SESSION_SECRET", "OWNER_EMAIL"} <= set(health["missing"])
