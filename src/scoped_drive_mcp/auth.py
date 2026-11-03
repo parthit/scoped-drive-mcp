@@ -1,9 +1,20 @@
-"""Bearer-token authentication as a pure ASGI middleware."""
+"""Bearer-token authentication as a pure ASGI middleware.
+
+`/mcp` accepts two kinds of bearer, checked in this order:
+
+1. A pre-shared `API_TOKENS` entry (constant-time hash compare). These are never
+   looked up as OAuth tokens.
+2. An opaque OAuth access token issued by this server's authorization server.
+
+Anything else is 401. The `WWW-Authenticate` header points at the protected-resource
+metadata (RFC 9728) so an OAuth client can discover the authorization server.
+The dashboard session cookie is not read here.
+"""
 
 import hashlib
 import hmac
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -20,6 +31,8 @@ class Principal:
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)
+
+OAuthResolver = Callable[[str], Principal | None]
 
 
 def hash_token(token: str) -> str:
@@ -64,10 +77,14 @@ class BearerAuthMiddleware:
         app: ASGIApp,
         tokens: Iterable[TokenEntry],
         exempt_paths: Iterable[str] = ("/health",),
+        oauth_resolve: OAuthResolver | None = None,
+        resource_metadata: str | None = None,
     ):
         self.app = app
         self.tokens = tuple(tokens)
         self.exempt_paths = frozenset(exempt_paths)
+        self.oauth_resolve = oauth_resolve
+        self.resource_metadata = resource_metadata
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in self.exempt_paths:
@@ -82,10 +99,12 @@ class BearerAuthMiddleware:
 
         token = extract_token(header)
         principal = verify_token(token, self.tokens) if token else None
+        if principal is None and token and self.oauth_resolve is not None:
+            principal = self.oauth_resolve(token)
         if principal is None:
             reason = "missing_token" if header is None else "invalid_token"
             audit_auth_failure(reason, scope.get("path", ""))
-            await _unauthorized(send, reason)
+            await _unauthorized(send, reason, self.resource_metadata)
             return
 
         reset = current_principal.set(principal)
@@ -95,7 +114,23 @@ class BearerAuthMiddleware:
             current_principal.reset(reset)
 
 
-async def _unauthorized(send: Send, reason: str) -> None:
+def www_authenticate(reason: str, resource_metadata: str | None) -> bytes:
+    """RFC 9728 discovery header. `resource_metadata` is the protected-resource URL.
+
+    A missing token carries only that parameter. A presented but rejected token also
+    carries `error="invalid_token"` (RFC 6750). Pre-shared API tokens never reach here.
+    """
+    params: list[str] = []
+    if resource_metadata:
+        params.append(f'resource_metadata="{resource_metadata}"')
+    if reason != "missing_token":
+        params.append('error="invalid_token"')
+    if not params:
+        return b'Bearer realm="scoped-drive-mcp"'
+    return ("Bearer " + ", ".join(params)).encode("ascii")
+
+
+async def _unauthorized(send: Send, reason: str, resource_metadata: str | None = None) -> None:
     body = json.dumps({"error": "unauthorized", "reason": reason}).encode()
     await send(
         {
@@ -104,7 +139,8 @@ async def _unauthorized(send: Send, reason: str) -> None:
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
-                (b"www-authenticate", b'Bearer realm="scoped-drive-mcp"'),
+                (b"www-authenticate", www_authenticate(reason, resource_metadata)),
+                (b"cache-control", b"no-store"),
             ],
         }
     )

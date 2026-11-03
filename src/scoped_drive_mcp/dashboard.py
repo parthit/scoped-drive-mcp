@@ -7,6 +7,7 @@ Every POST requires the per-session CSRF token, and a cross-origin `Origin` is r
 """
 
 import hmac
+import html
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -39,7 +40,9 @@ from .drive_client import (
     OwnerDriveClient,
 )
 from .grants import OWNER_FIELDS, GrantError, GrantService
+from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import OAuthClient, OAuthError
+from .policy import ADMIN_TOOLS
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
 
@@ -101,6 +104,7 @@ class DashboardContext:
     owner_drive_factory: Callable[[str], OwnerDriveClient]
     bot_drive: Any = None
     on_allowlist_change: Callable[[], None] = lambda: None
+    mcp_oauth: McpOAuth | None = None
     _owner_client: tuple[str, OwnerDriveClient] | None = field(default=None, repr=False)
 
     def owner_drive(self) -> OwnerDriveClient:
@@ -427,6 +431,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "unshared_count": len(ctx.grants().unshared()) if bot["connected"] else 0,
                 "allow_count": len(entries),
                 "pending_count": sum(1 for r in reqs if r.status == PENDING),
+                "grants": ctx.mcp_oauth.list_grants(settings.owner_email) if ctx.mcp_oauth else [],
             }
 
         data = await blocking(gather)
@@ -650,6 +655,131 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def not_found(request: Request) -> Response:
         return render(request, "error.html", 404, message="Page not found.")
 
+    # ---- MCP OAuth consent (Grok Bot / other remote clients) ------------
+
+    def _oauth_error(request: Request, exc: AuthorizeError, *, from_form: bool = False) -> Response:
+        if exc.redirect_uri and ctx.mcp_oauth is not None:
+            try:
+                target = ctx.mcp_oauth.error_redirect(exc)
+            except AuthorizeError:
+                target = None
+            if target is not None:
+                # A form POST's redirect chain is checked against form-action. Stay on
+                # this origin and let the next page navigate to the client.
+                if from_form:
+                    return _parked_redirect(request, target)
+                return RedirectResponse(target, status_code=303)
+        status = 403 if exc.error == "access_denied" else 400
+        return render(request, "error.html", status, message=exc.description)
+
+    def _parked_redirect(request: Request, url: str) -> Response:
+        assert ctx.mcp_oauth is not None
+        try:
+            ticket = ctx.mcp_oauth.park_completion(url, str(request.session.get("owner") or ""))
+        except AuthorizeError as exc:
+            return render(request, "error.html", 400, message=exc.description)
+        return RedirectResponse("/oauth/continue?" + urlencode({"ticket": ticket}), status_code=303)
+
+    def _completion_page(url: str) -> HTMLResponse:
+        safe = html.escape(url, quote=True)
+        body = (
+            "<!doctype html><html><head><meta charset=utf-8>"
+            f'<meta http-equiv="refresh" content="0;url={safe}">'
+            "<title>Returning to the app</title></head><body>"
+            "<p>Returning to the app.</p>"
+            f'<p><a href="{safe}">Continue</a></p>'
+            "</body></html>"
+        )
+        return HTMLResponse(body)
+
+    async def oauth_authorize(request: Request) -> Response:
+        if ctx.mcp_oauth is None:
+            return render(request, "error.html", 404, message="OAuth is not configured.")
+        try:
+            pending = ctx.mcp_oauth.parse_authorize(request.query_params)
+        except AuthorizeError as exc:
+            return _oauth_error(request, exc)
+        signed_in = request.session.get("owner")
+        if signed_in and signed_in != settings.owner_email:
+            return render(
+                request,
+                "error.html",
+                403,
+                message="This Google account is not allowed to connect apps.",
+            )
+        if signed_in != settings.owner_email:
+            target = request.url.path
+            if request.url.query:
+                target += "?" + request.url.query
+            return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
+        request.session["mcp_auth"] = pending.to_dict()
+        return render(
+            request,
+            "consent.html",
+            client_name=pending.client_name,
+            redirect_uri=pending.redirect_uri,
+            scope=SCOPE,
+            requested_scope=pending.requested_scope,
+            tools=sorted(ADMIN_TOOLS),
+        )
+
+    async def oauth_decide(request: Request, form: dict[str, str]) -> Response:
+        if ctx.mcp_oauth is None:
+            return render(request, "error.html", 404, message="OAuth is not configured.")
+        decision = form.get("decision")
+        if decision not in ("allow", "deny"):
+            return render(request, "error.html", 400, message="Choose Allow or Deny.")
+        raw = request.session.get("mcp_auth")
+        if not isinstance(raw, dict):
+            return render(
+                request,
+                "error.html",
+                400,
+                message="This approval expired. Start the connection again from the app.",
+            )
+        try:
+            pending = ctx.mcp_oauth.parse_authorize(QueryMapping(raw))
+        except AuthorizeError as exc:
+            request.session.pop("mcp_auth", None)
+            return _oauth_error(request, exc, from_form=True)
+        request.session.pop("mcp_auth", None)
+        try:
+            if decision == "deny":
+                audit_owner("oauth_deny", client=pending.client_name)
+                target = ctx.mcp_oauth.deny(pending)
+            else:
+                audit_owner("oauth_approve", client=pending.client_name)
+                target = ctx.mcp_oauth.approve(str(request.session.get("owner")), pending)
+        except AuthorizeError as exc:
+            return _oauth_error(request, exc, from_form=True)
+        return _parked_redirect(request, target)
+
+    async def oauth_continue(request: Request) -> Response:
+        if ctx.mcp_oauth is None:
+            return render(request, "error.html", 404, message="OAuth is not configured.")
+        url = ctx.mcp_oauth.take_completion(
+            request.query_params.get("ticket") or "", settings.owner_email
+        )
+        if url is None:
+            return render(
+                request,
+                "error.html",
+                400,
+                message="This return link expired. Start the connection again from the app.",
+            )
+        return _completion_page(url)
+
+    async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
+        grant_id = form.get("grant_id") or ""
+        if ctx.mcp_oauth is None or not await blocking(
+            ctx.mcp_oauth.revoke, grant_id, email=settings.owner_email
+        ):
+            flash(request, "error", "That connection was not found.")
+        else:
+            audit_owner("oauth_revoke")
+            flash(request, "ok", "Disconnected the app. Its tokens no longer work.")
+        return RedirectResponse("/", status_code=303)
+
     routes = [
         Route("/login", login, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
@@ -669,6 +799,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
         Route("/requests/{rid}/deny", csrf_protected(request_deny), methods=["POST"]),
         Route("/activity", owner_only(activity), methods=["GET"]),
+        Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
+        Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
+        Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
+        Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     return Starlette(

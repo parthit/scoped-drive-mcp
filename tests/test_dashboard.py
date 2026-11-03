@@ -28,6 +28,7 @@ OWNER_POSTS = [
     "/bot/disconnect",
     "/requests/" + "A" * 32 + "/approve",
     "/requests/" + "A" * 32 + "/deny",
+    "/oauth/grants/revoke",
 ]
 
 
@@ -290,7 +291,15 @@ def test_bot_session_does_not_become_owner(no_env_bot_app) -> None:
 
 
 def test_csrf_required_on_every_post(owner_c, world) -> None:
-    for path in ("/grant", "/revoke", "/logout", "/connect-bot", "/bot/disconnect"):
+    for path in (
+        "/grant",
+        "/revoke",
+        "/logout",
+        "/connect-bot",
+        "/bot/disconnect",
+        "/oauth/authorize",
+        "/oauth/grants/revoke",
+    ):
         assert owner_c.post(path, data={"file_id": "proj"}).status_code == 403
         assert owner_c.post(path, data={"file_id": "proj", "csrf": "wrong"}).status_code == 403
     assert world.files["proj"].permissions == []

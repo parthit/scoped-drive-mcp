@@ -35,4 +35,30 @@
   {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in Vercel).</p>{% endif %}
   <p class="muted">Storage: {{ store_kind }}. <a href="/browse">Browse your Drive</a> and tick what the assistant may use.</p>
 </div>
+<h2>Connected apps</h2>
+<p class="muted">Apps such as Grok Bot that signed in with OAuth. Revoking disconnects the app immediately.
+  An API token from <code>make_token.py</code> is not listed here.</p>
+{% if grants %}
+<table>
+  <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {% for grant in grants %}
+  <tr>
+    <td>{{ grant.client_name }}</td>
+    <td class="muted">{{ grant.created_at }}</td>
+    <td class="muted">{{ grant.last_used or "never" }}</td>
+    <td style="text-align:right">
+      <form class="inline" method="post" action="/oauth/grants/revoke">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="grant_id" value="{{ grant.id }}">
+        <button class="danger" type="submit">Revoke</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card"><p>No apps connected.</p></div>
+{% endif %}
 {% endblock %}

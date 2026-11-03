@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Allow access{% endblock %}
+{% block content %}
+<div class="card" style="max-width:640px">
+  <h1>Allow {{ client_name }}?</h1>
+  <p><b>{{ client_name }}</b> wants to connect to this Drive server.</p>
+  <p>Scope: <code>{{ scope }}</code>. Allowing it lets the app call these tools
+    (the same set as an admin token) on the items you have ticked:</p>
+  <ul>
+    {% for tool in tools %}
+    <li><code>{{ tool }}</code></li>
+    {% endfor %}
+  </ul>
+  {% if requested_scope and requested_scope != scope %}
+  <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server grants <code>{{ scope }}</code>.</p>
+  {% endif %}
+  <p class="muted">After you choose, the browser returns to <code>{{ redirect_uri }}</code>.
+    Unticked files stay blocked. You can disconnect the app later from the overview page.</p>
+  <form method="post" action="/oauth/authorize">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="primary" type="submit" name="decision" value="allow">Allow</button>
+    <button class="danger" type="submit" name="decision" value="deny">Deny</button>
+  </form>
+</div>
+{% endblock %}
