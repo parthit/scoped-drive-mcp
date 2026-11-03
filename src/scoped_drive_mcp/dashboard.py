@@ -213,6 +213,22 @@ def render_plain(template: str, status_code: int = 200, **ctx: Any) -> HTMLRespo
     return HTMLResponse(html, status_code=status_code)
 
 
+async def terms_page(_: Request) -> Response:
+    return render_plain("terms.html")
+
+
+async def privacy_page(_: Request) -> Response:
+    return render_plain("privacy.html")
+
+
+def legal_routes() -> list[Route]:
+    """Public /terms and /privacy. Google's OAuth screen links here with no session."""
+    return [
+        Route("/terms", terms_page, methods=["GET"]),
+        Route("/privacy", privacy_page, methods=["GET"]),
+    ]
+
+
 def is_owner(request: Request, settings: Settings) -> bool:
     owner = request.session.get("owner")
     return bool(owner) and owner == settings.owner_email
@@ -230,7 +246,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render_plain("setup.html", status_code=503, missing=missing)
 
         return Starlette(
-            routes=[Route("/{path:path}", not_configured, methods=["GET", "POST"])],
+            routes=[
+                *legal_routes(),
+                Route("/{path:path}", not_configured, methods=["GET", "POST"]),
+            ],
             middleware=[Middleware(SecurityHeadersMiddleware)],
         )
 
@@ -419,6 +438,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return RedirectResponse("/connect-bot", status_code=303)
 
     # ---- pages -----------------------------------------------------------
+
+    async def home(request: Request) -> Response:
+        # Logged-out visitors get the public page linked from the Google consent screen.
+        if not is_owner(request, settings):
+            return render_plain("home.html")
+        return await overview(request)
 
     async def overview(request: Request) -> Response:
         def gather() -> dict[str, Any]:
@@ -785,7 +810,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
-        Route("/", owner_only(overview), methods=["GET"]),
+        Route("/", home, methods=["GET"]),
         Route("/connect-bot", owner_only(connect_bot_page), methods=["GET"]),
         Route("/connect-bot", csrf_protected(connect_bot_start), methods=["POST"]),
         Route("/bot/disconnect", csrf_protected(bot_disconnect), methods=["POST"]),
@@ -803,6 +828,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
         Route("/oauth/continue", owner_only(oauth_continue), methods=["GET"]),
         Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
+        *legal_routes(),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     return Starlette(

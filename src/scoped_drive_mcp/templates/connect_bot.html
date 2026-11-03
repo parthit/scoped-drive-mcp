@@ -19,8 +19,10 @@
       {% if bot.source == "env" %}through the <code>GOOGLE_OAUTH_REFRESH_TOKEN</code> env var{% else %}from this dashboard{% endif %}
     {% else %}<span class="pill bad">not connected</span>{% endif %}
   </p>
-  <p>To connect, click below. On Google's page, <b>switch to the bot account ({{ bot_email }})</b>,
-     not your own, and allow Drive access. Signing in with any other account is rejected.</p>
+  <p>Connecting asks Google, for <b>{{ bot_email }}</b>, for that account’s email address and
+     full Drive access. Scoped Drive uses them only so the assistant can open items you
+     share with this account. On Google’s page, switch to {{ bot_email }}, not your own.
+     Any other account is rejected. See the <a href="/privacy">privacy policy</a>.</p>
   <form method="post" action="/connect-bot" class="inline">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="primary" type="submit">{{ "Reconnect bot" if bot.connected else "Connect bot" }}</button>

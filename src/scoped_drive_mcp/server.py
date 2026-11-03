@@ -33,7 +33,7 @@ from . import audit as audit_module
 from .access import AccessRequests, AccessService
 from .auth import BearerAuthMiddleware, current_principal
 from .config import Settings
-from .dashboard import DashboardContext, build_dashboard, render_plain
+from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
 from .drive_client import (
     BOT_NOT_CONNECTED,
     OWNER_NOT_SIGNED_IN,
@@ -252,6 +252,7 @@ def _misconfigured_app(exc: ValidationError) -> Starlette:
         routes=[
             Route(HEALTH_PATH, health, methods=["GET"]),
             Route(MCP_PATH, unavailable, methods=["GET", "POST", "DELETE"]),
+            *legal_routes(),
             Route("/{path:path}", dashboard_unavailable, methods=["GET", "POST"]),
         ]
     )
@@ -296,6 +297,7 @@ def _storage_missing_app(settings: Settings) -> Starlette:
         routes=[
             Route(HEALTH_PATH, health, methods=["GET"]),
             Route(MCP_PATH, unavailable, methods=["GET", "POST", "DELETE"]),
+            *legal_routes(),
             Route("/{path:path}", dashboard_unavailable, methods=["GET", "POST"]),
         ]
     )
