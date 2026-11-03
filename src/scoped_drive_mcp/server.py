@@ -45,6 +45,7 @@ from .drive_client import (
     OwnerDriveClient,
     oauth_credentials,
 )
+from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .oauth import GoogleOAuthClient, OAuthClient
 from .policy import is_allowed, require
 from .scope import ScopeGuard
@@ -391,6 +392,12 @@ def build_app(
             settings.google_oauth_client_secret.get_secret_value(),
             f"{settings.app_base_url}/auth/callback",
         )
+    base_url = settings.app_base_url
+    mcp_oauth = (
+        McpOAuth(kv, base_url, settings.owner_email)
+        if base_url and not settings.dashboard_missing()
+        else None
+    )
     ctx = DashboardContext(
         settings=settings,
         store=kv,
@@ -402,6 +409,7 @@ def build_app(
         owner_drive_factory=owner_drive_factory or _owner_factory(settings),
         bot_drive=drive_client,
         on_allowlist_change=guard.invalidate_allowlist,
+        mcp_oauth=mcp_oauth,
     )
     dashboard = build_dashboard(ctx)
 
@@ -425,15 +433,22 @@ def build_app(
         return JSONResponse(body)
 
     mcp_endpoint = BearerAuthMiddleware(
-        StatelessMCPEndpoint(mcp), tokens=settings.api_tokens, exempt_paths=()
+        StatelessMCPEndpoint(mcp),
+        tokens=settings.api_tokens,
+        exempt_paths=(),
+        oauth_resolve=None if mcp_oauth is None else mcp_oauth.resolve_access,
+        resource_metadata=(
+            None if mcp_oauth is None else protected_resource_metadata_url(base_url)
+        ),
     )
-    app = Starlette(
-        routes=[
-            Route(HEALTH_PATH, health, methods=["GET"]),
-            Route(MCP_PATH, mcp_endpoint),
-            Mount("/", app=dashboard),
-        ],
-    )
+    routes: list[Any] = [
+        Route(HEALTH_PATH, health, methods=["GET"]),
+        Route(MCP_PATH, mcp_endpoint),
+    ]
+    if mcp_oauth is not None:
+        routes.extend(mcp_oauth.routes())
+    routes.append(Mount("/", app=dashboard))
+    app = Starlette(routes=routes)
     app.state.mcp = mcp
     app.state.service = service
     app.state.dashboard = ctx

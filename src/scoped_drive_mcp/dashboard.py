@@ -39,7 +39,9 @@ from .drive_client import (
     OwnerDriveClient,
 )
 from .grants import OWNER_FIELDS, GrantError, GrantService
+from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import OAuthClient, OAuthError
+from .policy import ADMIN_TOOLS
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
 
@@ -101,6 +103,7 @@ class DashboardContext:
     owner_drive_factory: Callable[[str], OwnerDriveClient]
     bot_drive: Any = None
     on_allowlist_change: Callable[[], None] = lambda: None
+    mcp_oauth: McpOAuth | None = None
     _owner_client: tuple[str, OwnerDriveClient] | None = field(default=None, repr=False)
 
     def owner_drive(self) -> OwnerDriveClient:
@@ -427,6 +430,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "unshared_count": len(ctx.grants().unshared()) if bot["connected"] else 0,
                 "allow_count": len(entries),
                 "pending_count": sum(1 for r in reqs if r.status == PENDING),
+                "grants": ctx.mcp_oauth.list_grants(settings.owner_email) if ctx.mcp_oauth else [],
             }
 
         data = await blocking(gather)
@@ -650,6 +654,91 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def not_found(request: Request) -> Response:
         return render(request, "error.html", 404, message="Page not found.")
 
+    # ---- MCP OAuth consent (Grok Bot / other remote clients) ------------
+
+    def _oauth_error(request: Request, exc: AuthorizeError) -> Response:
+        if exc.redirect_uri and ctx.mcp_oauth is not None:
+            try:
+                return RedirectResponse(ctx.mcp_oauth.error_redirect(exc), status_code=303)
+            except AuthorizeError:
+                pass
+        status = 403 if exc.error == "access_denied" else 400
+        return render(request, "error.html", status, message=exc.description)
+
+    async def oauth_authorize(request: Request) -> Response:
+        if ctx.mcp_oauth is None:
+            return render(request, "error.html", 404, message="OAuth is not configured.")
+        try:
+            pending = ctx.mcp_oauth.parse_authorize(request.query_params)
+        except AuthorizeError as exc:
+            return _oauth_error(request, exc)
+        signed_in = request.session.get("owner")
+        if signed_in and signed_in != settings.owner_email:
+            return render(
+                request,
+                "error.html",
+                403,
+                message="This Google account is not allowed to connect apps.",
+            )
+        if signed_in != settings.owner_email:
+            target = request.url.path
+            if request.url.query:
+                target += "?" + request.url.query
+            return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
+        request.session["mcp_auth"] = pending.to_dict()
+        return render(
+            request,
+            "consent.html",
+            client_name=pending.client_name,
+            redirect_uri=pending.redirect_uri,
+            scope=SCOPE,
+            requested_scope=pending.requested_scope,
+            tools=sorted(ADMIN_TOOLS),
+        )
+
+    async def oauth_decide(request: Request, form: dict[str, str]) -> Response:
+        if ctx.mcp_oauth is None:
+            return render(request, "error.html", 404, message="OAuth is not configured.")
+        decision = form.get("decision")
+        if decision not in ("allow", "deny"):
+            return render(request, "error.html", 400, message="Choose Allow or Deny.")
+        raw = request.session.get("mcp_auth")
+        if not isinstance(raw, dict):
+            return render(
+                request,
+                "error.html",
+                400,
+                message="This approval expired. Start the connection again from the app.",
+            )
+        try:
+            pending = ctx.mcp_oauth.parse_authorize(QueryMapping(raw))
+        except AuthorizeError as exc:
+            request.session.pop("mcp_auth", None)
+            return _oauth_error(request, exc)
+        request.session.pop("mcp_auth", None)
+        try:
+            if decision == "deny":
+                audit_owner("oauth_deny", client=pending.client_name)
+                return RedirectResponse(ctx.mcp_oauth.deny(pending), status_code=303)
+            audit_owner("oauth_approve", client=pending.client_name)
+            return RedirectResponse(
+                ctx.mcp_oauth.approve(str(request.session.get("owner")), pending),
+                status_code=303,
+            )
+        except AuthorizeError as exc:
+            return _oauth_error(request, exc)
+
+    async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
+        grant_id = form.get("grant_id") or ""
+        if ctx.mcp_oauth is None or not await blocking(
+            ctx.mcp_oauth.revoke, grant_id, email=settings.owner_email
+        ):
+            flash(request, "error", "That connection was not found.")
+        else:
+            audit_owner("oauth_revoke")
+            flash(request, "ok", "Disconnected the app. Its tokens no longer work.")
+        return RedirectResponse("/", status_code=303)
+
     routes = [
         Route("/login", login, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
@@ -669,6 +758,9 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
         Route("/requests/{rid}/deny", csrf_protected(request_deny), methods=["POST"]),
         Route("/activity", owner_only(activity), methods=["GET"]),
+        Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
+        Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
+        Route("/oauth/grants/revoke", csrf_protected(revoke_oauth_grant), methods=["POST"]),
         Route("/{path:path}", owner_only(not_found), methods=["GET"]),
     ]
     return Starlette(

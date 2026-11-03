@@ -64,6 +64,13 @@ class MemoryStore:
             value = self._live(key)
             return value if isinstance(value, str) else None
 
+    def getdel(self, key: str) -> str | None:
+        """Return a string value and delete it. Expired keys disappear."""
+        with self._lock:
+            value = self._live(key)
+            self._values.pop(key, None)
+            return value if isinstance(value, str) else None
+
     def set(self, key: str, value: str, ex: int | None = None) -> None:
         with self._lock:
             expires = self._clock() + ex if ex else None
@@ -133,6 +140,10 @@ class RedisStore:
 
     def get(self, key: str) -> str | None:
         value = self._redis.get(key)
+        return None if value is None else str(value)
+
+    def getdel(self, key: str) -> str | None:
+        value = self._redis.getdel(key)
         return None if value is None else str(value)
 
     def set(self, key: str, value: str, ex: int | None = None) -> None:

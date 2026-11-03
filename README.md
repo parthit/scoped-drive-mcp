@@ -189,7 +189,8 @@ Both sign-ins are stored in Redis, encrypted with `ENCRYPTION_KEY`. (Prefer the 
 uv run python scripts/make_token.py grok-viewer viewer
 ```
 
-Put the printed `API_TOKENS` entry into Vercel (step 2.4) and redeploy; give the token itself to Grok.
+Put the printed `API_TOKENS` entry into Vercel (step 2.4) and redeploy. Give that token to the xAI API or the
+Grok Build CLI. Grok Bot cannot use it; connect the bot with [Connect Grok Bot](#connect-grok-bot) instead.
 
 **xAI Responses API:**
 
@@ -208,9 +209,24 @@ curl https://api.x.ai/v1/responses \
   }'
 ```
 
-**grok.com:** **Connectors → New Connector → Custom**, URL `https://<project>.vercel.app/mcp`, and the token as
-the bearer token/API key if the form offers it. (Unverified: if the form only supports OAuth, use the API route.)
+**grok.com:** **Connectors → New Connector → Custom** may only offer OAuth. Use [Connect Grok Bot](#connect-grok-bot)
+for that. A static bearer, when the form still has a token field, is the `make_token.py` secret from this step.
 Also disconnect Grok's built-in Google Drive connector so it can't bypass this server (see (g) below).
+
+### Connect Grok Bot
+
+Grok Bot attaches a remote MCP server by URL and authenticates only with OAuth. It cannot use a static bearer.
+The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
+
+1. Finish dashboard sign-in and tick at least one folder.
+2. In the Grok Bot chat, say: Add this MCP server: https://scoped-drive-mcp.vercel.app/mcp
+3. When the browser opens, sign in as the owner and click Allow.
+4. Do not paste the make_token.py secret into the Grok Bot chat. That token is only for the xAI API and the Grok Build CLI.
+5. Ask the bot to list allowed files. An unticked file should still return an approval link.
+
+Allow grants the same tools as an admin API token, still limited to ticked items. The overview page lists the
+connection under **Connected apps**; **Revoke** disconnects it immediately. The dashboard sign-in cookie is not
+a token for `/mcp`.
 
 ### 7. Test it
 
@@ -398,11 +414,15 @@ chat.append(user("Summarise the newest document in my Drive folder."))
 print(chat.sample().content)
 ```
 
+#### Grok Bot
+
+Grok Bot cannot use a static bearer. See [Connect Grok Bot](#connect-grok-bot).
+
 #### grok.com
 
-Open **Connectors → New Connector → Custom**, and enter `https://<project>.vercel.app/mcp` plus the token.
-**Unverified:** it's not confirmed whether the Custom connector form accepts a static bearer token. If it
-only offers OAuth, use the API route above for now (an OAuth layer could be added later).
+Open **Connectors → New Connector → Custom**, and enter `https://<project>.vercel.app/mcp`. If the form only
+offers OAuth, finish [Connect Grok Bot](#connect-grok-bot) (sign in as the owner and click Allow). If it still
+has a bearer field, that value is the token from step (d), not an OAuth access token.
 
 ### (g) Disconnect Grok's built-in Google Drive connector
 
@@ -492,6 +512,11 @@ After changing dependencies, regenerate Vercel's requirements file:
 - **Tokens:** only SHA-256 hashes are stored on the server and compared in constant time. Tokens you give to
   xAI are stored by xAI as part of your requests. Use long random tokens (the script makes 256-bit ones) and
   rotate them by editing `API_TOKENS`.
+- **OAuth for Grok Bot:** remote MCP clients that cannot hold a static bearer register themselves and send you
+  through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
+  SHA-256 hashes are stored. The connection is an admin token on `/mcp` and still cannot pass the allowlist.
+  Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
+  Redirect URLs are an exact allow list (Cursor, Grok Bot, and a local test callback).
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
@@ -535,10 +560,11 @@ src/scoped_drive_mcp/
   access.py                   access requests (storage, dedupe, request tools)
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log
-  oauth.py                    Google web OAuth (authorization code)
+  oauth.py                    Google web OAuth (authorization code) for the dashboard
+  mcp_oauth.py                MCP OAuth 2.1 authorization server (Grok Bot / PKCE)
   dashboard.py                owner dashboard routes (Starlette)
   templates/                  dashboard HTML (Jinja2)
-  auth.py                     bearer-token ASGI middleware for /mcp
+  auth.py                     bearer-token ASGI middleware for /mcp (API tokens and OAuth access tokens)
   audit.py                    JSON-lines audit log (+ Redis activity sink)
   service.py                  tool implementations
   server.py                   FastMCP tools + build_app()
@@ -550,7 +576,9 @@ tests/                        pytest suite with a fake Drive (owner and bot view
 - Uses the official MCP Python SDK's `FastMCP` (`mcp>=1.30,<2`). In `mcp` 2.x `FastMCP` was renamed to `MCPServer`,
   so the 1.x line is pinned.
 - The dashboard is a separate Starlette app mounted next to `/mcp` and `/health`; `/mcp` is wrapped in the
-  bearer middleware on its own, so the two never share credentials.
+  bearer middleware on its own, so the dashboard cookie and the MCP bearer are not interchangeable. `/mcp`
+  accepts either a pre-shared `API_TOKENS` bearer or an OAuth access token from `/oauth/token`. Discovery
+  documents under `/.well-known/` are public.
 - The server runs in stateless JSON mode. Instead of relying on the ASGI lifespan to start FastMCP's
   session manager (serverless runtimes may skip lifespan, or send the first request before startup finishes),
   `/mcp` starts a short-lived stateless session manager **inside each request**. This works the same under
