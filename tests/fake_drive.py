@@ -1,11 +1,26 @@
-"""In-memory Drive v3 stand-in that understands the subset of the `q` language we generate."""
+"""In-memory Drive v3 stand-in that understands the subset of the `q` language we generate.
+
+A FakeDrive with `viewer=None` sees every file (the phase-1 tests use that). `as_user(email)`
+returns a view that shares the same files but only sees what that account could see in
+Drive: files it owns, files under a folder it owns, and files shared with it directly or
+through an ancestor folder (sharing is inherited).
+"""
 
 import itertools
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveNotFoundError
+from scoped_drive_mcp.drive_client import (
+    FOLDER_MIME,
+    UPDATE_METADATA_KEYS,
+    DriveNotFoundError,
+    check_create_metadata,
+)
+
+
+class FakeForbiddenError(Exception):
+    """Stands in for a Drive 403 (e.g. sharing an item you do not own)."""
 
 
 @dataclass
@@ -16,6 +31,9 @@ class FakeFile:
     parents: list[str]
     content: bytes = b""
     trashed: bool = False
+    owner: str | None = None
+    permissions: list[dict[str, str]] = field(default_factory=list)
+    shortcut_target: str | None = None
 
     def as_api(self, fields: str) -> dict[str, Any]:
         full = {
@@ -31,6 +49,8 @@ class FakeFile:
         }
         if self.mime_type == FOLDER_MIME:
             full.pop("size")
+        if self.shortcut_target is not None:
+            full["shortcutDetails"] = {"targetId": self.shortcut_target}
         wanted = {f.strip() for f in fields.split(",")}
         return {k: v for k, v in full.items() if k in wanted}
 
@@ -145,6 +165,10 @@ class FakeDrive:
     ignore_parent_filter: bool = False
     page_size_cap: int = 1000
     _ids: Any = field(default_factory=lambda: itertools.count(1))
+    viewer: str | None = None
+    roots: dict[str, str] = field(default_factory=dict)
+    content_calls: list[str] = field(default_factory=list)
+    permission_calls: list[tuple] = field(default_factory=list)
 
     def add(
         self,
@@ -154,16 +178,55 @@ class FakeDrive:
         parents: list[str],
         content: bytes = b"",
         trashed: bool = False,
+        *,
+        owner: str | None = None,
+        shortcut_target: str | None = None,
     ) -> FakeFile:
-        f = FakeFile(file_id, name, mime_type, list(parents), content, trashed)
+        f = FakeFile(
+            file_id,
+            name,
+            mime_type,
+            list(parents),
+            content,
+            trashed,
+            owner=owner,
+            shortcut_target=shortcut_target,
+        )
         self.files[file_id] = f
         return f
 
+    def as_user(self, email: str) -> "FakeDrive":
+        return FakeDrive(files=self.files, viewer=email, roots=self.roots, _ids=self._ids)
+
+    def share(self, file_id: str, email: str, role: str = "writer") -> str:
+        pid = f"perm-{next(self._ids):04d}"
+        self.files[file_id].permissions.append({"id": pid, "emailAddress": email, "role": role})
+        return pid
+
+    def visible(self, f: FakeFile) -> bool:
+        if self.viewer is None:
+            return True
+        seen: set[str] = set()
+        frontier = [f]
+        while frontier:
+            node = frontier.pop()
+            if node.id in seen:
+                continue
+            seen.add(node.id)
+            if node.owner == self.viewer:
+                return True
+            if any(p["emailAddress"] == self.viewer for p in node.permissions):
+                return True
+            frontier.extend(self.files[p] for p in node.parents if p in self.files)
+        return False
+
     def _get(self, file_id: str) -> FakeFile:
-        try:
-            return self.files[file_id]
-        except KeyError:
-            raise DriveNotFoundError(file_id) from None
+        if file_id == "root" and self.viewer in self.roots:
+            file_id = self.roots[self.viewer]
+        f = self.files.get(file_id)
+        if f is None or not self.visible(f):
+            raise DriveNotFoundError(file_id)
+        return f
 
     def get_file(self, file_id: str, fields: str) -> dict[str, Any]:
         self.get_calls.append(file_id)
@@ -177,7 +240,7 @@ class FakeDrive:
             pred = compile_query(re.sub(r" and \((?:'[^']*' in parents(?: or )?)+\)", "", q))
         else:
             pred = compile_query(q)
-        matches = [f for f in self.files.values() if pred(f)]
+        matches = [f for f in self.files.values() if pred(f) and self.visible(f)]
         start = int(page_token or 0)
         size = min(page_size, self.page_size_cap)
         page = matches[start : start + size]
@@ -187,15 +250,20 @@ class FakeDrive:
         return resp
 
     def export(self, file_id: str, mime_type: str) -> bytes:
+        self.content_calls.append(file_id)
         f = self._get(file_id)
         return f.content
 
     def download(self, file_id: str, max_bytes: int) -> bytes:
+        self.content_calls.append(file_id)
         return self._get(file_id).content[:max_bytes]
 
     def create(
         self, metadata: dict[str, Any], content: bytes | None, content_mime: str | None, fields: str
     ) -> dict[str, Any]:
+        check_create_metadata(metadata)
+        for parent in metadata["parents"]:
+            self._get(parent)
         new_id = f"new-file-{next(self._ids):04d}"
         f = self.add(
             new_id,
@@ -203,8 +271,24 @@ class FakeDrive:
             metadata.get("mimeType", content_mime or ""),
             list(metadata.get("parents", [])),
             content or b"",
+            owner=self.viewer,
         )
         return f.as_api(fields)
+
+    def create_permission(self, file_id: str, email: str, role: str) -> str:
+        f = self._get(file_id)
+        if self.viewer is not None and f.owner != self.viewer:
+            raise FakeForbiddenError(file_id)
+        self.permission_calls.append(("create", file_id, email, role))
+        return self.share(file_id, email, role)
+
+    def delete_permission(self, file_id: str, permission_id: str) -> None:
+        f = self._get(file_id)
+        self.permission_calls.append(("delete", file_id, permission_id))
+        before = len(f.permissions)
+        f.permissions = [p for p in f.permissions if p["id"] != permission_id]
+        if len(f.permissions) == before:
+            raise DriveNotFoundError(permission_id)
 
     def update(
         self,
@@ -216,7 +300,7 @@ class FakeDrive:
     ) -> dict[str, Any]:
         f = self._get(file_id)
         metadata = metadata or {}
-        assert set(metadata) <= {"name", "trashed"}, f"unexpected metadata update {metadata}"
+        assert set(metadata) <= UPDATE_METADATA_KEYS, f"unexpected metadata update {metadata}"
         if "name" in metadata:
             f.name = metadata["name"]
         if metadata.get("trashed"):

@@ -54,7 +54,7 @@ def build_tree() -> FakeDrive:
     d.add("sheet-1", "Budget", SHEET_MIME, [ROOT], b"a,b\n1,2\n")
     d.add("image-png", "photo.png", "image/png", [ROOT], b"\x89PNG\r\n\x1a\n\x00\x00")
     d.add("trashed-txt", "old plan.txt", "text/plain", [ROOT], b"plan trashed", trashed=True)
-    d.add("shortcut-1", "link to outside", SHORTCUT_MIME, [ROOT])
+    d.add("shortcut-1", "link to outside", SHORTCUT_MIME, [ROOT], shortcut_target="outside-file")
     d.add("outside-folder", "Private", FOLDER_MIME, ["bot-my-drive-root"])
     d.add("outside-file", "plan outside.txt", "text/plain", ["outside-folder"], b"outside plan")
     d.add("multi-parent", "plan both.txt", "text/plain", ["outside-folder", "sub-a"], b"plan x")
@@ -136,3 +136,117 @@ def app(drive: FakeDrive, settings: Settings, clock: FakeClock):
         ),
         store=MemoryStore(),
     )
+
+
+# ---- phase 2: one Drive seen by the owner and by the bot -------------------
+
+EVE = "eve@example.com"
+
+
+class FakeOAuth:
+    """Google OAuth stand-in: the code says which account signed in."""
+
+    def __init__(self) -> None:
+        self.revoked: list[str] = []
+        self.hints: list[str | None] = []
+        self.accounts = {
+            "owner-code": (OWNER_EMAIL, True),
+            "bot-code": (BOT_EMAIL, True),
+            "eve-code": (EVE, True),
+            "unverified-owner-code": (OWNER_EMAIL, False),
+        }
+        self.scopes = frozenset({"openid", "email", "https://www.googleapis.com/auth/drive"})
+
+    def authorization_url(self, state: str, login_hint: str | None = None) -> str:
+        self.hints.append(login_hint)
+        return f"https://accounts.google.com/o/oauth2/v2/auth?state={state}"
+
+    def exchange_code(self, code: str):
+        from scoped_drive_mcp.oauth import OAuthError, OAuthTokens
+
+        if code not in self.accounts:
+            raise OAuthError("Google rejected the sign-in code")
+        email = self.accounts[code][0]
+        return OAuthTokens(
+            access_token=f"at:{code}", refresh_token=f"rt-{email}", scopes=self.scopes
+        )
+
+    def userinfo(self, access_token: str) -> dict:
+        email, verified = self.accounts[access_token.removeprefix("at:")]
+        return {"email": email, "email_verified": verified}
+
+    def revoke(self, token: str) -> None:
+        self.revoked.append(token)
+
+
+def build_world() -> FakeDrive:
+    """The owner's My Drive. Nothing is shared with the bot yet, except one stray file a
+    third party shared with it (which must still be refused: it is not on the allowlist)."""
+    w = FakeDrive()
+    w.roots[OWNER_EMAIL] = "owner-root"
+    w.roots[BOT_EMAIL] = "bot-root"
+    o = {"owner": OWNER_EMAIL}
+    w.add("owner-root", "My Drive", FOLDER_MIME, [], **o)
+    w.add("bot-root", "My Drive", FOLDER_MIME, [], owner=BOT_EMAIL)
+    w.add("proj", "Projects", FOLDER_MIME, ["owner-root"], **o)
+    w.add("proj-sub", "Sub", FOLDER_MIME, ["proj"], **o)
+    w.add("proj-deep-doc", "Deep roadmap", DOC_MIME, ["proj-sub"], b"roadmap secret", **o)
+    w.add("proj-notes", "notes.txt", "text/plain", ["proj"], b"project notes alpha", **o)
+    w.add(
+        "proj-shortcut",
+        "link to payroll",
+        SHORTCUT_MIME,
+        ["proj"],
+        shortcut_target="priv-secret",
+        **o,
+    )
+    w.add("priv", "Private", FOLDER_MIME, ["owner-root"], **o)
+    w.add("priv-secret", "payroll.txt", "text/plain", ["priv"], b"TOP SECRET payroll", **o)
+    w.add("priv-other", "other.txt", "text/plain", ["priv"], b"other private", **o)
+    w.add("loose-doc", "Loose memo", DOC_MIME, ["owner-root"], b"memo beta", **o)
+    w.add("loose-two", "Second memo", DOC_MIME, ["owner-root"], b"memo gamma", **o)
+    w.add("eve-root", "My Drive", FOLDER_MIME, [], owner=EVE)
+    w.add(
+        "stray-shared", "secret from eve.txt", "text/plain", ["eve-root"], b"eve secret", owner=EVE
+    )
+    w.share("stray-shared", BOT_EMAIL, "reader")
+    return w
+
+
+@pytest.fixture
+def world() -> FakeDrive:
+    return build_world()
+
+
+@pytest.fixture
+def oauth() -> FakeOAuth:
+    return FakeOAuth()
+
+
+@pytest.fixture
+def memstore() -> MemoryStore:
+    return MemoryStore()
+
+
+@pytest.fixture
+def p2_settings() -> Settings:
+    return make_settings(root_folder_id=None, allowlist_cache_ttl=0)
+
+
+@pytest.fixture
+def p2_app(world: FakeDrive, p2_settings: Settings, memstore: MemoryStore, oauth: FakeOAuth):
+    owner_tokens: list[str] = []
+
+    def owner_factory(token: str) -> FakeDrive:
+        owner_tokens.append(token)
+        return world.as_user(OWNER_EMAIL)
+
+    app = build_app(
+        p2_settings,
+        world.as_user(BOT_EMAIL),
+        store=memstore,
+        owner_drive_factory=owner_factory,
+        oauth=oauth,
+    )
+    app.state.owner_tokens = owner_tokens
+    return app
