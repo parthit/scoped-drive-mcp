@@ -2,6 +2,7 @@
 
 import json
 
+import anyio
 import httpx
 import pytest
 
@@ -157,3 +158,16 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
         assert settings == {"API_TOKENS"}
         assert (await c.post("/mcp", json=INIT)).status_code == 503
         assert (await c.get("/browse")).status_code == 503
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+async def test_authenticated_get_and_delete_return_405_promptly(client, method: str) -> None:
+    headers = {"Authorization": f"Bearer {TOKENS['viewer']}", "Accept": "text/event-stream"}
+    with anyio.fail_after(5):
+        r = await client.request(method, "/mcp", headers=headers)
+    assert r.status_code == 405
+    assert r.headers["allow"] == "POST"
+    # authentication still runs first
+    r = await client.request(method, "/mcp", headers={"Accept": "text/event-stream"})
+    assert r.status_code == 401

@@ -207,6 +207,16 @@ class StatelessMCPEndpoint:
         self.mcp = mcp
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # A stateless server has no stream to resume (GET) or session to end (DELETE); a
+        # per-request manager would hold a GET open until the platform timeout.
+        if scope.get("method") != "POST":
+            response = JSONResponse(
+                {"error": "method not allowed; send JSON-RPC requests with POST"},
+                status_code=405,
+                headers={"Allow": "POST"},
+            )
+            await response(scope, receive, send)
+            return
         manager = StreamableHTTPSessionManager(
             app=self.mcp._mcp_server,
             json_response=True,
