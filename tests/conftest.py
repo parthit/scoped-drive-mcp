@@ -1,6 +1,8 @@
 import hashlib
+import secrets
 
 import pytest
+from cryptography.fernet import Fernet
 
 from scoped_drive_mcp.access import AccessRequests, AccessService
 from scoped_drive_mcp.config import Settings
@@ -15,14 +17,13 @@ ROOT = "root-folder-0001"
 BASE_URL = "https://drive-test.example.com"
 OWNER_EMAIL = "owner@example.com"
 BOT_EMAIL = "bot@example.com"
-SESSION_SECRET = "s" * 48
-ENCRYPTION_KEY = "q8vZ5sV4m9kq3Z2o6Xb1d0eQyL7tWcR8nH5gJ2aK3pE="
-
-TOKENS = {
-    "viewer": "viewer-secret-token",
-    "editor": "editor-secret-token",
-    "admin": "admin-secret-token",
-}
+# Generated per test run so nothing in the repo looks like a real credential.
+SESSION_SECRET = secrets.token_urlsafe(48)
+ENCRYPTION_KEY = Fernet.generate_key().decode()
+TOKENS = {role: secrets.token_urlsafe(32) for role in ("viewer", "editor", "admin")}
+CLIENT_ID = "placeholder-client-id"
+CLIENT_SECRET = f"placeholder-{secrets.token_hex(8)}"
+REFRESH_TOKEN = f"placeholder-{secrets.token_hex(8)}"
 
 
 def sha(value: str) -> str:
@@ -84,9 +85,9 @@ def make_settings(**overrides) -> Settings:
     values = {
         "root_folder_id": ROOT,
         "api_tokens": API_TOKENS,
-        "google_oauth_client_id": "test-client-id",
-        "google_oauth_client_secret": "test-client-secret",
-        "google_oauth_refresh_token": "test-refresh-token",
+        "google_oauth_client_id": CLIENT_ID,
+        "google_oauth_client_secret": CLIENT_SECRET,
+        "google_oauth_refresh_token": REFRESH_TOKEN,
         "scope_cache_ttl": 60,
         "max_bytes": 4096,
         "max_chars": 2000,

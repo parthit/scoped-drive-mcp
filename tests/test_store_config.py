@@ -1,5 +1,7 @@
 """Settings for phase 2, the key-value stores, the token vault and the lazy bot client."""
 
+import secrets
+
 import pytest
 from pydantic import ValidationError
 
@@ -17,19 +19,23 @@ from scoped_drive_mcp.store import (
 )
 from tests.conftest import API_TOKENS, ENCRYPTION_KEY, FakeClock, make_settings
 
+KV_TOKEN = secrets.token_urlsafe(16)
+UP_TOKEN = secrets.token_urlsafe(16)
+VAULT_TOKEN = secrets.token_urlsafe(16)
+
 
 def test_redis_env_names(monkeypatch) -> None:
     monkeypatch.setenv("API_TOKENS", API_TOKENS)
     monkeypatch.setenv("KV_REST_API_URL", "https://kv.example.upstash.io")
-    monkeypatch.setenv("KV_REST_API_TOKEN", "kv-token")
+    monkeypatch.setenv("KV_REST_API_TOKEN", KV_TOKEN)
     s = Settings()
     assert s.redis_rest_url == "https://kv.example.upstash.io" and s.redis_configured
     monkeypatch.setenv("UPSTASH_REDIS_REST_URL", "https://up.example.upstash.io")
-    monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", "up-token")
+    monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", UP_TOKEN)
     s = Settings()
     assert s.redis_rest_url == "https://up.example.upstash.io"  # Upstash names win
-    assert s.redis_rest_token.get_secret_value() == "up-token"
-    assert "up-token" not in repr(s)
+    assert s.redis_rest_token.get_secret_value() == UP_TOKEN
+    assert UP_TOKEN not in repr(s)
 
 
 def test_phase2_env(monkeypatch) -> None:
@@ -134,10 +140,10 @@ def test_redis_store_calls(monkeypatch) -> None:
 def test_token_vault_encrypts() -> None:
     kv = PrefixedStore(MemoryStore())
     vault = TokenVault(kv, ENCRYPTION_KEY)
-    vault.set_owner("refresh-secret", "owner@example.com")
+    vault.set_owner(VAULT_TOKEN, "owner@example.com")
     raw = kv.get("vault:owner_refresh_token")
-    assert raw and "refresh-secret" not in raw and "owner@example.com" not in raw
-    assert vault.owner()["t"] == "refresh-secret"
+    assert raw and VAULT_TOKEN not in raw and "owner@example.com" not in raw
+    assert vault.owner()["t"] == VAULT_TOKEN
     from cryptography.fernet import Fernet
 
     other = TokenVault(kv, Fernet.generate_key().decode())

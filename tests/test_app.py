@@ -1,13 +1,14 @@
 """In-process smoke tests of the ASGI app (no lifespan, like a serverless runtime)."""
 
 import json
+import secrets
 
 import anyio
 import httpx
 import pytest
 
 from scoped_drive_mcp.server import build_app
-from tests.conftest import TOKENS
+from tests.conftest import CLIENT_SECRET, REFRESH_TOKEN, TOKENS
 
 MCP_HEADERS = {
     "Accept": "application/json, text/event-stream",
@@ -54,7 +55,7 @@ async def test_health_needs_no_auth(client, drive) -> None:
     assert body["missing"] == ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"]
     assert body["bot_connected"] is True and body["bot_source"] == "env"
     assert body["owner_connected"] is False
-    assert "test-refresh-token" not in r.text and "test-client-secret" not in r.text
+    assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
     assert drive.get_calls == [] and drive.queries == []
 
 
@@ -63,8 +64,8 @@ async def test_health_needs_no_auth(client, drive) -> None:
     "headers",
     [
         MCP_HEADERS,
-        {**MCP_HEADERS, "Authorization": "Bearer wrong-token"},
-        {**MCP_HEADERS, "Authorization": "Basic dXNlcjpwYXNz"},
+        {**MCP_HEADERS, "Authorization": f"Bearer {secrets.token_urlsafe(32)}"},
+        {**MCP_HEADERS, "Authorization": f"Basic {secrets.token_urlsafe(12)}"},
         {**MCP_HEADERS, "Authorization": ""},
     ],
 )
