@@ -3,10 +3,13 @@
 {% block content %}
 <div class="card">
   <h1>Setup incomplete</h1>
+  {% if problem %}<p>{{ problem }}</p>{% endif %}
+  {% if missing %}
   <p>The dashboard needs these environment variables before it can start:</p>
   <ul>
     {% for name in missing %}<li><code>{{ name }}</code></li>{% endfor %}
   </ul>
+  {% endif %}
   <p class="muted">Set them in Vercel → Project → Settings → Environment Variables, then redeploy.
      See the README's "Phase 2 setup and test walkthrough".</p>
 </div>

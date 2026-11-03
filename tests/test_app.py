@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from scoped_drive_mcp.server import build_app
-from tests.conftest import CLIENT_SECRET, REFRESH_TOKEN, TOKENS
+from tests.conftest import CLIENT_SECRET, REFRESH_TOKEN, TOKENS, make_settings
 
 MCP_HEADERS = {
     "Accept": "application/json, text/event-stream",
@@ -172,3 +172,56 @@ async def test_authenticated_get_and_delete_return_405_promptly(client, method: 
     # authentication still runs first
     r = await client.request(method, "/mcp", headers={"Accept": "text/event-stream"})
     assert r.status_code == 401
+
+
+# ---- no silent in-memory store on Vercel -------------------------------------------------
+
+
+@pytest.fixture
+def no_redis_env(monkeypatch):
+    for name in (
+        "UPSTASH_REDIS_REST_URL",
+        "UPSTASH_REDIS_REST_TOKEN",
+        "KV_REST_API_URL",
+        "KV_REST_API_TOKEN",
+        "REDIS_REST_URL",
+        "REDIS_REST_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.anyio
+async def test_vercel_without_redis_refuses_to_serve(monkeypatch, no_redis_env, drive) -> None:
+    monkeypatch.setenv("VERCEL", "1")
+    app = build_app(make_settings(), drive)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://x.vercel.app") as c:
+        r = await c.get("/health")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["status"] == "misconfigured"
+        assert body["store_error"] == "redis_not_configured"
+        assert "UPSTASH_REDIS_REST_URL" in body["missing"] and "Redis" in body["detail"]
+        assert REFRESH_TOKEN not in r.text and CLIENT_SECRET not in r.text
+        r = await c.post("/mcp", json=INIT, headers=auth("admin"))
+        assert r.status_code == 503 and "storage" in r.json()["error"]
+        for path in ("/", "/browse", "/login"):
+            page = await c.get(path)
+            assert page.status_code == 503 and "Redis is not configured" in page.text
+    assert drive.get_calls == [] and drive.queries == []
+
+
+def test_local_without_redis_uses_memory(monkeypatch, no_redis_env, drive) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    app = build_app(make_settings(), drive)
+    assert app.state.dashboard.store.kind == "memory"
+    monkeypatch.setenv("VERCEL", "")
+    assert build_app(make_settings(), drive).state.dashboard.store.kind == "memory"
+
+
+def test_vercel_with_redis_builds_normally(monkeypatch, drive) -> None:
+    monkeypatch.setenv("VERCEL", "1")
+    settings = make_settings(
+        redis_rest_url="https://example.upstash.io", redis_rest_token=secrets.token_urlsafe(16)
+    )
+    assert build_app(settings, drive).state.dashboard.store.kind == "redis"

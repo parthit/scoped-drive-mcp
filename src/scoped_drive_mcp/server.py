@@ -10,6 +10,7 @@ depend on lifespan at all.
 """
 
 import logging
+import os
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any
@@ -32,7 +33,7 @@ from . import audit as audit_module
 from .access import AccessRequests, AccessService
 from .auth import BearerAuthMiddleware, current_principal
 from .config import Settings
-from .dashboard import DashboardContext, build_dashboard
+from .dashboard import DashboardContext, build_dashboard, render_plain
 from .drive_client import (
     BotNotConnectedError,
     DriveClient,
@@ -253,6 +254,50 @@ def _misconfigured_app(exc: ValidationError) -> Starlette:
     )
 
 
+def running_on_vercel() -> bool:
+    return bool(os.environ.get("VERCEL", "").strip())
+
+
+STORAGE_MISSING = (
+    "Redis is not configured. On Vercel, memory does not survive between requests, so grants, "
+    "requests and stored sign-ins would be lost. Connect an Upstash Redis database (it sets "
+    "KV_REST_API_URL and KV_REST_API_TOKEN) or set UPSTASH_REDIS_REST_URL and "
+    "UPSTASH_REDIS_REST_TOKEN, then redeploy."
+)
+
+
+def _storage_missing_app(settings: Settings) -> Starlette:
+    """On Vercel without Redis: refuse to serve instead of silently using per-instance memory."""
+    logger.error("scoped-drive-mcp: %s", STORAGE_MISSING)
+    body = {
+        "status": "misconfigured",
+        "mode": settings.mode,
+        "store": None,
+        "store_error": "redis_not_configured",
+        "missing": settings.missing_settings(),
+        "detail": STORAGE_MISSING,
+    }
+
+    async def health(_: Request) -> JSONResponse:
+        return JSONResponse(body, status_code=503)
+
+    async def unavailable(_: Request) -> JSONResponse:
+        return JSONResponse(
+            {"error": "server storage is not configured; see /health"}, status_code=503
+        )
+
+    async def dashboard_unavailable(_: Request) -> Response:
+        return render_plain("setup.html", status_code=503, missing=[], problem=STORAGE_MISSING)
+
+    return Starlette(
+        routes=[
+            Route(HEALTH_PATH, health, methods=["GET"]),
+            Route(MCP_PATH, unavailable, methods=["GET", "POST", "DELETE"]),
+            Route("/{path:path}", dashboard_unavailable, methods=["GET", "POST"]),
+        ]
+    )
+
+
 GuardFactory = Callable[[DriveClient, Settings, Callable[[], Mapping[str, str]]], ScopeGuard]
 
 
@@ -288,6 +333,9 @@ def build_app(
             settings = Settings()  # type: ignore[call-arg]
         except ValidationError as exc:
             return _misconfigured_app(exc)
+
+    if store is None and not settings.redis_configured and running_on_vercel():
+        return _storage_missing_app(settings)
 
     kv = PrefixedStore(store) if store is not None else build_store(settings)
     allowlist = Allowlist(kv)
