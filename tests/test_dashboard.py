@@ -66,6 +66,8 @@ def test_login_page_is_public(c) -> None:
     assert r.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
+    # Google requires the data disclosure immediately before the consent button.
+    assert r.text.index("Full access to Google Drive") < r.text.index("Sign in with Google")
 
 
 def test_public_home_is_the_consent_screen_page(c) -> None:
@@ -73,7 +75,7 @@ def test_public_home_is_the_consent_screen_page(c) -> None:
     assert r.status_code == 200
     assert "gateway that sits in front of Google Drive" in r.text
     assert 'href="/privacy"' in r.text and 'href="/terms"' in r.text
-    assert "Sign in with Google" in r.text
+    assert ">Privacy policy</a>" in r.text and ">Terms of service</a>" in r.text
     assert "set-cookie" not in {name.lower() for name in r.headers}
 
 
@@ -81,7 +83,7 @@ def test_public_home_is_the_consent_screen_page(c) -> None:
     ("path", "needle"),
     [
         ("/terms", "gateway that sits in front of Google Drive"),
-        ("/privacy", "Limited Use requirements"),
+        ("/privacy", "Google API Services User Data Policy"),
     ],
 )
 def test_legal_pages_are_public(c, path: str, needle: str) -> None:

@@ -1,12 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Sign in{% endblock %}
 {% block content %}
-<div class="card" style="max-width:480px;margin:40px auto;">
-  <h1>Sign in</h1>
-  <p>This dashboard controls which Google Drive items the assistant may use.
-     Only the owner's Google account can sign in.</p>
+<div class="card" style="max-width:520px;margin:40px auto;">
+  <h1>Sign in to Scoped Drive</h1>
+  <p>Only the owner’s Google account can sign in to this deployment.</p>
+  <p>Scoped Drive will ask Google for:</p>
+  <ul>
+    <li>Your email address, to confirm this is the owner account.</li>
+    <li>Full access to Google Drive (<code>https://www.googleapis.com/auth/drive</code>).
+        Drive cannot limit an app to selected files and folders, so Scoped Drive uses
+        that access only to enforce the list you tick and to let an assistant you connect
+        read or change those items. File contents go to that assistant for those items
+        only. They are not sold, not used for advertising, and not used to train a model.</li>
+  </ul>
+  <p>This is described in the <a href="/privacy">privacy policy</a> and the
+     <a href="/terms">terms of service</a>.</p>
   <p><a class="btn primary" href="/auth/login?next={{ next | urlencode }}">Sign in with Google</a></p>
-  <p class="muted">Google may warn that the app is unverified. That is expected for a personal app:
-     choose <b>Advanced</b>, then <b>Go to … (unsafe)</b>.</p>
 </div>
 {% endblock %}
