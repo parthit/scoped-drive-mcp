@@ -297,6 +297,14 @@ def _retired_key(digest: str) -> str:
     return f"oauth:rtused:{digest}"
 
 
+def _seen_key(grant_id: str) -> str:
+    return f"oauth:seen:{grant_id}"
+
+
+def _bounce_key(digest: str) -> str:
+    return f"oauth:bounce:{digest}"
+
+
 class McpOAuth:
     def __init__(self, store: KeyValueStore, base_url: str, owner_email: str | None):
         self.store = store
@@ -309,6 +317,43 @@ class McpOAuth:
         if not uri or any(ch in uri for ch in ("\r", "\n", "\t", " ", "\\")):
             return False
         return uri in redirect_allowlist(self.base_url)
+
+    def completion_url_ok(self, url: str) -> bool:
+        """True when `url` is an allowlisted redirect plus an optional query string."""
+        if not url or any(ch in url for ch in ("\r", "\n", "\t", " ", "\\", "#", '"', "<", ">")):
+            return False
+        base, _, _query = url.partition("?")
+        return self.redirect_allowed(base)
+
+    def park_completion(self, url: str, email: str) -> str:
+        """Store a one-time same-origin handoff. The authorization code stays server-side."""
+        if not self.owner_email or email != self.owner_email or not self.completion_url_ok(url):
+            raise AuthorizeError("invalid_request", "That redirect URL is not allowed.")
+        ticket = secrets.token_urlsafe(32)
+        payload = json.dumps({"url": url, "email": email}, separators=(",", ":"))
+        self.store.set(_bounce_key(hash_token(ticket)), payload, ex=120)
+        return ticket
+
+    def take_completion(self, ticket: str, email: str | None) -> str | None:
+        if not self.owner_email or not email or email != self.owner_email:
+            return None
+        if not ticket or len(ticket) > 200:
+            return None
+        raw = self._consume(_bounce_key(hash_token(ticket)))
+        if not raw:
+            return None
+        try:
+            saved = json.loads(raw)
+        except ValueError:
+            return None
+        url = saved.get("url")
+        if (
+            not isinstance(url, str)
+            or saved.get("email") != email
+            or not self.completion_url_ok(url)
+        ):
+            return None
+        return url
 
     # ---- metadata --------------------------------------------------------
 
@@ -661,8 +706,10 @@ class McpOAuth:
             or grant.refresh_hash is None
             or not _same(grant.refresh_hash, digest)
         ):
-            if grant is not None and grant.refresh_hash is not None and not _same(
-                grant.refresh_hash, digest
+            if (
+                grant is not None
+                and grant.refresh_hash is not None
+                and not _same(grant.refresh_hash, digest)
             ):
                 self.revoke(grant.id)
             raise TokenError("invalid_grant", "refresh token is not valid")
@@ -736,10 +783,9 @@ class McpOAuth:
             or not _same(str(saved.get("client_id", "")), grant.client_id)
         ):
             return None
-        now = utc_now()
-        if (grant.last_used or "")[:16] != now[:16]:
-            grant.last_used = now
-            self._save_grant(grant)
+        # Last-use is a side key. Rewriting the grant here races _issue_tokens and can
+        # drop a refresh hash or access hash that was saved in between.
+        self._note_use(grant.id)
         return Principal(token_name=_principal_name(grant.client_name), role=Role.ADMIN)
 
     def list_grants(self, email: str | None) -> list[GrantView]:
@@ -757,7 +803,7 @@ class McpOAuth:
                         id=grant.id,
                         client_name=grant.client_name,
                         created_at=grant.created_at,
-                        last_used=grant.last_used,
+                        last_used=self._displayed_last_used(grant),
                     )
                 )
         views.sort(key=lambda item: item.created_at, reverse=True)
@@ -777,8 +823,23 @@ class McpOAuth:
             self.store.delete(_rt_key(grant.refresh_hash))
         if grant.code_hash:
             self.store.delete(_code_key(grant.code_hash))
+        self.store.delete(_seen_key(grant.id))
         self.store.hdel(GRANTS_KEY, grant.id)
         return True
+
+    def _note_use(self, grant_id: str) -> None:
+        now = utc_now()
+        key = _seen_key(grant_id)
+        current = self.store.get(key)
+        if current is not None and current[:16] == now[:16]:
+            return
+        self.store.set(key, now, ex=REFRESH_TTL)
+
+    def _displayed_last_used(self, grant: OAuthGrant) -> str | None:
+        seen = self.store.get(_seen_key(grant.id))
+        if seen and (grant.last_used or "") < seen:
+            return seen
+        return grant.last_used
 
     def _grant(self, grant_id: str) -> OAuthGrant | None:
         if not grant_id:

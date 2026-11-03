@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import html
 import json
 import re
 import secrets
@@ -11,7 +12,7 @@ import itsdangerous
 import pytest
 
 from scoped_drive_mcp.dashboard import SESSION_COOKIE
-from scoped_drive_mcp.mcp_oauth import ALLOWED_REDIRECT_URIS, done_redirect
+from scoped_drive_mcp.mcp_oauth import ALLOWED_REDIRECT_URIS, GRANTS_KEY, OAuthGrant, done_redirect
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import MemoryStore
 from tests.conftest import BASE_URL, SESSION_SECRET, TOKENS
@@ -94,6 +95,30 @@ def tool_names(c, token: str) -> set[str]:
 def code_from(location: str) -> str:
     query = parse_qs(urlparse(location).query)
     return query["code"][0]
+
+
+def posted_redirect(c, response) -> str:
+    """Follow the same-origin handoff that a consent POST returns."""
+    assert response.status_code == 303, response.text
+    location = response.headers["location"]
+    assert location.startswith("/oauth/continue?"), location
+    assert "code=" not in location
+    assert "error=" not in location
+    assert location.startswith("/") and not location.startswith("//")
+    page = c.get(location)
+    assert page.status_code == 200, page.text
+    policy = page.headers["content-security-policy"]
+    assert "form-action 'self' https://accounts.google.com" in policy
+    assert "grok.com" not in policy
+    assert "cursor.com" not in policy
+    match = re.search(r'http-equiv="refresh" content="0;url=([^"]+)"', page.text)
+    assert match, page.text
+    target = html.unescape(match.group(1))
+    assert "evil.example" not in target
+    expired = c.get(location)
+    assert expired.status_code == 400
+    assert "http-equiv" not in expired.text
+    return target
 
 
 def forge_session(owner: str) -> str:
@@ -319,9 +344,9 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     assert "trash_file" in page.text
     assert "something-else" in page.text
     denied = post(owner_c, "/oauth/authorize", decision="deny")
-    assert denied.status_code == 303
-    query = parse_qs(urlparse(denied.headers["location"]).query)
-    assert denied.headers["location"].startswith(CURSOR)
+    target = posted_redirect(owner_c, denied)
+    query = parse_qs(urlparse(target).query)
+    assert target.startswith(CURSOR)
     assert query["error"] == ["access_denied"]
     assert query["state"] == ["state-1"]
     assert "code" not in query
@@ -332,8 +357,7 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     assert blocked.status_code == 403
     assert "location" not in blocked.headers
     allowed = post(owner_c, "/oauth/authorize", decision="allow")
-    assert allowed.status_code == 303
-    location = allowed.headers["location"]
+    location = posted_redirect(owner_c, allowed)
     assert location.startswith(CURSOR + "?")
     query = parse_qs(urlparse(location).query)
     assert query["state"] == ["returned-state"]
@@ -347,10 +371,8 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     verifier, params = auth_params(client_id, DONE)
     assert owner_c.get("/oauth/authorize", params=params).status_code == 200
     allowed = post(owner_c, "/oauth/authorize", decision="allow")
-    code = code_from(allowed.headers["location"])
-    mismatch = exchange(
-        owner_c, client_id, code, verifier, "http://127.0.0.1:8787/callback"
-    )
+    code = code_from(posted_redirect(owner_c, allowed))
+    mismatch = exchange(owner_c, client_id, code, verifier, "http://127.0.0.1:8787/callback")
     assert mismatch.status_code == 400
     assert mismatch.json()["error"] == "invalid_grant"
     replay = exchange(owner_c, client_id, code, verifier, DONE)
@@ -358,7 +380,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
 
     verifier, params = auth_params(client_id, DONE)
     assert owner_c.get("/oauth/authorize", params=params).status_code == 200
-    code = code_from(post(owner_c, "/oauth/authorize", decision="allow").headers["location"])
+    code = code_from(posted_redirect(owner_c, post(owner_c, "/oauth/authorize", decision="allow")))
     bad_pkce = exchange(owner_c, client_id, code, secrets.token_urlsafe(32), DONE)
     assert bad_pkce.status_code == 400
     assert bad_pkce.json()["error"] == "invalid_grant"
@@ -366,7 +388,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
 
     verifier, params = auth_params(client_id, DONE)
     assert owner_c.get("/oauth/authorize", params=params).status_code == 200
-    code = code_from(post(owner_c, "/oauth/authorize", decision="allow").headers["location"])
+    code = code_from(posted_redirect(owner_c, post(owner_c, "/oauth/authorize", decision="allow")))
     token = exchange(owner_c, client_id, code, verifier, DONE)
     assert token.status_code == 200, token.text
     body = token.json()
@@ -439,7 +461,7 @@ def test_revoked_grant_cannot_call_mcp(owner_c) -> None:
     client_id = created.json()["client_id"]
     verifier, params = auth_params(client_id, GROK)
     assert owner_c.get("/oauth/authorize", params=params).status_code == 200
-    code = code_from(post(owner_c, "/oauth/authorize", decision="allow").headers["location"])
+    code = code_from(posted_redirect(owner_c, post(owner_c, "/oauth/authorize", decision="allow")))
     token = exchange(owner_c, client_id, code, verifier, GROK)
     access = token.json()["access_token"]
     refresh = token.json()["refresh_token"]
@@ -480,3 +502,81 @@ def test_dashboard_cookie_cannot_call_mcp(owner_c) -> None:
     response = owner_c.post("/mcp", json=INIT, headers=MCP_HEADERS)
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == f'Bearer resource_metadata="{METADATA}"'
+
+
+def test_continue_ignores_an_external_url_query(owner_c) -> None:
+    response = owner_c.get(
+        "/oauth/continue",
+        params={"url": "https://evil.example/phish", "ticket": "nope"},
+    )
+    assert response.status_code == 400
+    assert "evil.example" not in response.text
+    assert "http-equiv" not in response.text
+    assert "location" not in response.headers
+
+
+def test_non_owner_cannot_post_consent(c) -> None:
+    c.cookies.set(SESSION_COOKIE, forge_session("eve@example.com"))
+    response = c.post("/oauth/authorize", data={"decision": "allow", "csrf": "tok"})
+    assert response.status_code == 403
+    assert "location" not in response.headers
+
+
+def test_oauth_bearer_cannot_post_to_dashboard(owner_c) -> None:
+    created = register(owner_c, GROK, name="Grok Bot")
+    client_id = created.json()["client_id"]
+    verifier, params = auth_params(client_id, GROK)
+    assert owner_c.get("/oauth/authorize", params=params).status_code == 200
+    code = code_from(posted_redirect(owner_c, post(owner_c, "/oauth/authorize", decision="allow")))
+    access = exchange(owner_c, client_id, code, verifier, GROK).json()["access_token"]
+    grant_id = next(iter(owner_c.app.state.dashboard.store.hgetall(GRANTS_KEY)))
+    stranger = client(owner_c.app)
+    denied = stranger.post(
+        "/oauth/grants/revoke",
+        data={"grant_id": grant_id, "csrf": "tok"},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert denied.status_code == 403
+    assert "list_folder" in tool_names(owner_c, access)
+
+
+def test_access_check_does_not_clobber_rotated_grant(owner_c) -> None:
+    created = register(owner_c, DONE, name="Local test")
+    client_id = created.json()["client_id"]
+    verifier, params = auth_params(client_id, DONE)
+    assert owner_c.get("/oauth/authorize", params=params).status_code == 200
+    code = code_from(posted_redirect(owner_c, post(owner_c, "/oauth/authorize", decision="allow")))
+    access = exchange(owner_c, client_id, code, verifier, DONE).json()["access_token"]
+    oauth = owner_c.app.state.dashboard.mcp_oauth
+    store = owner_c.app.state.dashboard.store
+    grant_id = next(iter(store.hgetall(GRANTS_KEY)))
+    before = store.hget(GRANTS_KEY, grant_id)
+    assert oauth.resolve_access(access) is not None
+    after = store.hget(GRANTS_KEY, grant_id)
+    assert json.loads(after)["access_hashes"] == json.loads(before)["access_hashes"]
+    assert json.loads(after)["refresh_hash"] == json.loads(before)["refresh_hash"]
+    store.set(f"oauth:seen:{grant_id}", "2099-01-01T00:00:00+00:00", ex=3600)
+    assert "2099-01-01T00:00:00+00:00" in owner_c.get("/").text
+
+    original = oauth._grant
+    issued: dict[str, str] = {}
+    state = {"done": False}
+
+    def hooked(gid: str):
+        grant = original(gid)
+        if grant is not None and not state["done"]:
+            state["done"] = True
+            fresh = OAuthGrant.from_json(grant.to_json())
+            oauth._issue_tokens(fresh)
+            assert fresh.refresh_hash is not None
+            issued["hash"] = fresh.refresh_hash
+        return grant
+
+    oauth._grant = hooked
+    try:
+        assert oauth.resolve_access(access) is not None
+    finally:
+        oauth._grant = original
+    assert original(grant_id) is not None
+    assert original(grant_id).refresh_hash == issued["hash"]
+    assert issued["hash"] != json.loads(before)["refresh_hash"]
