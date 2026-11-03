@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Scoped Drive{% endblock %} · Scoped Drive</title>
+<style>
+  :root { --fg:#1d2330; --muted:#667085; --line:#e4e7ec; --bg:#f7f8fa; --card:#fff;
+          --accent:#2457d6; --ok:#137333; --okbg:#e6f4ea; --bad:#b42318; --badbg:#fdecea;
+          --warnbg:#fff7e0; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+         color:var(--fg); background:var(--bg); }
+  header { background:var(--card); border-bottom:1px solid var(--line); }
+  .bar { max-width:1040px; margin:0 auto; padding:10px 20px; display:flex; gap:18px;
+         align-items:center; flex-wrap:wrap; }
+  .brand { font-weight:650; margin-right:8px; }
+  nav a { color:var(--muted); text-decoration:none; padding:6px 2px; }
+  nav a.on, nav a:hover { color:var(--fg); border-bottom:2px solid var(--accent); }
+  .spacer { flex:1; }
+  main { max-width:1040px; margin:0 auto; padding:24px 20px 60px; }
+  h1 { font-size:22px; margin:0 0 16px; }
+  h2 { font-size:17px; margin:28px 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:18px 20px; margin-bottom:16px; }
+  .muted { color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+  .stat b { display:block; font-size:24px; }
+  table { width:100%; border-collapse:collapse; background:var(--card);
+          border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line);
+           vertical-align:middle; }
+  th { font-size:13px; color:var(--muted); font-weight:600; background:#fbfbfc; }
+  tr:last-child td { border-bottom:none; }
+  a { color:var(--accent); }
+  form.inline { display:inline; margin:0; }
+  button, .btn { font:inherit; border:1px solid var(--line); background:var(--card);
+                 border-radius:7px; padding:5px 12px; cursor:pointer; color:var(--fg);
+                 text-decoration:none; display:inline-block; }
+  button.primary, .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--bad); border-color:#f3c1bc; }
+  button:hover, .btn:hover { filter:brightness(0.96); }
+  input[type=text], input[type=search] { font:inherit; padding:6px 10px; border:1px solid var(--line);
+                     border-radius:7px; min-width:260px; }
+  .pill { font-size:12px; padding:2px 8px; border-radius:99px; background:#eef1f6; color:var(--muted);
+          white-space:nowrap; }
+  .pill.ok { background:var(--okbg); color:var(--ok); }
+  .pill.bad { background:var(--badbg); color:var(--bad); }
+  .pill.pending { background:var(--warnbg); color:#8a5a00; }
+  .flash { padding:10px 14px; border-radius:8px; margin-bottom:12px; }
+  .flash.ok { background:var(--okbg); color:var(--ok); }
+  .flash.error { background:var(--badbg); color:var(--bad); }
+  .warn { background:var(--warnbg); border:1px solid #f1d78a; padding:10px 14px; border-radius:8px;
+          margin-bottom:14px; }
+  .crumbs a { text-decoration:none; }
+  .crumbs span.sep { color:var(--muted); margin:0 6px; }
+  code { background:#eef1f6; padding:1px 5px; border-radius:4px; font-size:13px; }
+  .icon { width:1.4em; display:inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <span class="brand">Scoped Drive</span>
+    {% if owner %}
+    <nav>
+      <a href="/" class="{{ 'on' if nav == '/' }}">Overview</a>
+      <a href="/browse" class="{{ 'on' if nav == '/browse' }}">Browse</a>
+      <a href="/access" class="{{ 'on' if nav == '/access' }}">Access</a>
+      <a href="/requests" class="{{ 'on' if nav.startswith('/requests') }}">Requests</a>
+      <a href="/activity" class="{{ 'on' if nav == '/activity' }}">Activity</a>
+      <a href="/connect-bot" class="{{ 'on' if nav == '/connect-bot' }}">Bot</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="muted">{{ owner }}</span>
+    <form class="inline" method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit">Sign out</button>
+    </form>
+    {% endif %}
+  </div>
+</header>
+<main>
+  {% for kind, message in flashes %}
+  <div class="flash {{ kind }}">{{ message }}</div>
+  {% endfor %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -78,9 +78,12 @@ def test_settings_from_env(monkeypatch) -> None:
     assert s.google_oauth_refresh_token.get_secret_value() == "r3fr3sh-value"
 
 
-def test_settings_require_credentials() -> None:
-    with pytest.raises(ValidationError, match="GOOGLE_OAUTH_REFRESH_TOKEN"):
-        make_settings(google_oauth_refresh_token=None)
+def test_refresh_token_and_root_are_optional() -> None:
+    s = make_settings(google_oauth_refresh_token=None, root_folder_id=None)
+    assert s.env_bot_refresh_token is None and s.root_folder_id is None
+    # blank env values count as unset (the .env.example ships with empty values)
+    s = make_settings(google_oauth_refresh_token="  ", root_folder_id="")
+    assert s.env_bot_refresh_token is None and s.root_folder_id is None
     with pytest.raises(ValidationError):
         make_settings(root_folder_id="root")
 

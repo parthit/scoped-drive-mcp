@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="card" style="max-width:480px;margin:40px auto;">
+  <h1>Sign in</h1>
+  <p>This dashboard controls which Google Drive items the assistant may use.
+     Only the owner's Google account can sign in.</p>
+  <p><a class="btn primary" href="/auth/login?next={{ next | urlencode }}">Sign in with Google</a></p>
+  <p class="muted">Google may warn that the app is unverified. That is expected for a personal app:
+     choose <b>Advanced</b>, then <b>Go to … (unsafe)</b>.</p>
+</div>
+{% endblock %}

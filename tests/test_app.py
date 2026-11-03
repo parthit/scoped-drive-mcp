@@ -47,7 +47,13 @@ async def client(app):
 async def test_health_needs_no_auth(client, drive) -> None:
     r = await client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    # only Redis is missing in the test settings (an in-memory store is injected)
+    assert body["status"] == "incomplete"
+    assert body["missing"] == ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"]
+    assert body["bot_connected"] is True and body["bot_source"] == "env"
+    assert body["owner_connected"] is False
+    assert "test-refresh-token" not in r.text and "test-client-secret" not in r.text
     assert drive.get_calls == [] and drive.queries == []
 
 
@@ -77,7 +83,7 @@ async def _initialize(client, role: str) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("role", "count"), [("viewer", 4), ("editor", 9), ("admin", 10)])
+@pytest.mark.parametrize(("role", "count"), [("viewer", 6), ("editor", 11), ("admin", 12)])
 async def test_initialize_and_list_tools(client, role: str, count: int) -> None:
     await _initialize(client, role)
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth(role))
@@ -100,7 +106,8 @@ async def test_tool_calls_over_http(client) -> None:
     call = rpc("tools/call", {"name": "read_file", "arguments": {"file_id": "outside-file"}})
     result = (await client.post("/mcp", json=call, headers=auth("viewer"))).json()["result"]
     assert result["isError"] is True
-    assert "Forbidden" in result["content"][0]["text"]
+    assert result["structuredContent"]["error"] == "access_required"
+    assert json.loads(result["content"][0]["text"])["error"] == "access_required"
     assert "outside plan" not in json.dumps(result)
 
     call = rpc("tools/call", {"name": "trash_file", "arguments": {"file_id": "notes-txt"}})
@@ -113,7 +120,7 @@ async def test_tool_calls_over_http(client) -> None:
 async def test_principal_does_not_leak_between_requests(client) -> None:
     await _initialize(client, "admin")
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth("viewer"))
-    assert len(r.json()["result"]["tools"]) == 4
+    assert len(r.json()["result"]["tools"]) == 6
 
 
 def test_starlette_testclient_with_lifespan(app) -> None:
@@ -125,7 +132,7 @@ def test_starlette_testclient_with_lifespan(app) -> None:
         r = tc.post("/mcp", json=INIT, headers=auth("editor"))
         assert r.status_code == 200
         r = tc.post("/mcp", json=rpc("tools/list"), headers=auth("editor"))
-        assert len(r.json()["result"]["tools"]) == 9
+        assert len(r.json()["result"]["tools"]) == 11
 
 
 @pytest.mark.anyio
@@ -147,5 +154,6 @@ async def test_misconfigured_app_health(monkeypatch) -> None:
         assert r.json()["status"] == "misconfigured"
         assert "do-not-leak-this" not in r.text
         settings = {p["setting"] for p in r.json()["problems"]}
-        assert {"ROOT_FOLDER_ID", "API_TOKENS"} <= settings
+        assert settings == {"API_TOKENS"}
         assert (await c.post("/mcp", json=INIT)).status_code == 503
+        assert (await c.get("/browse")).status_code == 503

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Access{% endblock %}
+{% block content %}
+<h1>What the assistant can use</h1>
+<p class="muted">Each item below is shared with the bot account and on the server's allowlist.
+  Shared folders include everything inside them. Revoking removes both.</p>
+<table>
+  <thead><tr><th>Name</th><th>Type</th><th>Granted</th><th>Via</th><th></th></tr></thead>
+  <tbody>
+  {% if root_folder_id %}
+  <tr>
+    <td><code>{{ root_folder_id }}</code></td><td class="muted">Folder</td><td class="muted">—</td>
+    <td class="muted">ROOT_FOLDER_ID env var</td><td class="muted" style="text-align:right">change in Vercel</td>
+  </tr>
+  {% endif %}
+  {% for e in rows %}
+  <tr>
+    <td>{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
+    <td class="muted">{{ describe_mime(e.mime_type) }}</td>
+    <td class="muted">{{ e.granted_at }}</td>
+    <td class="muted">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">request</a>{% else %}dashboard{% endif %}</td>
+    <td style="text-align:right">
+      <form class="inline" method="post" action="/revoke">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="file_id" value="{{ e.id }}">
+        <input type="hidden" name="next" value="/access">
+        <button class="danger" type="submit">Revoke</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  {% if not root_folder_id %}<tr><td colspan="5" class="muted">Nothing is shared yet. <a href="/browse">Browse your Drive</a> to grant items.</td></tr>{% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

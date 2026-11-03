@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Bot account{% endblock %}
+{% block content %}
+<h1>Bot account</h1>
+<div class="card">
+  <p>The assistant reaches Drive as <b>{{ bot_email }}</b>. Items you grant are shared with this account,
+     and the server only uses what is on your allowlist.</p>
+  <p>Status:
+    {% if bot.connected %}<span class="pill ok">connected</span>
+      {% if bot.source == "env" %}through the <code>GOOGLE_OAUTH_REFRESH_TOKEN</code> env var{% else %}from this dashboard{% endif %}
+    {% else %}<span class="pill bad">not connected</span>{% endif %}
+  </p>
+  <p>To connect, click below. On Google's page, <b>switch to the bot account ({{ bot_email }})</b>,
+     not your own, and allow Drive access. Signing in with any other account is rejected.</p>
+  <form method="post" action="/connect-bot" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="primary" type="submit">{{ "Reconnect bot" if bot.connected else "Connect bot" }}</button>
+  </form>
+  {% if bot.source == "dashboard" %}
+  <form method="post" action="/bot/disconnect" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="danger" type="submit">Remove stored connection</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

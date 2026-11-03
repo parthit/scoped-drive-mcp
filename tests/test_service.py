@@ -60,8 +60,14 @@ def test_read_outside_forbidden(service: DriveService, file_id: str) -> None:
         service.get_metadata(file_id)
 
 
-def test_list_folder_defaults_to_root(service: DriveService) -> None:
+def test_list_folder_without_id_lists_allowed_items(service: DriveService) -> None:
     result = service.list_folder()
+    assert [f["id"] for f in result["files"]] == [ROOT]
+    assert result["folder"] is None
+
+
+def test_list_root_folder(service: DriveService) -> None:
+    result = service.list_folder(ROOT)
     ids = {f["id"] for f in result["files"]}
     assert ids == {"sub-a", "sheet-1", "image-png", "shortcut-1"}
     assert result["folder"]["id"] == ROOT

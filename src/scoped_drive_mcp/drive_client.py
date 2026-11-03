@@ -1,12 +1,17 @@
 """Google credentials and a thin Drive v3 wrapper.
 
 The rest of the server only talks to the `DriveClient` protocol, so tests can
-swap in an in-memory fake. The wrapper deliberately exposes no way to change
-parents, permissions or to permanently delete anything.
+swap in an in-memory fake. The bot-facing wrapper deliberately exposes no way to
+change parents, permissions or to permanently delete anything: `create` and
+`update` only forward whitelisted metadata keys and never pass
+addParents/removeParents. Permission calls exist only on `GoogleOwnerDriveClient`,
+which the dashboard uses with the owner's own credentials.
 """
 
 import io
 import threading
+import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .config import Settings
@@ -18,9 +23,16 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_APPS_PREFIX = "application/vnd.google-apps."
 
+CREATE_METADATA_KEYS = frozenset({"name", "mimeType", "parents"})
+UPDATE_METADATA_KEYS = frozenset({"name", "trashed"})
+
 
 class DriveNotFoundError(Exception):
-    """The file does not exist or the bot identity cannot see it."""
+    """The file does not exist or the identity cannot see it."""
+
+
+class BotNotConnectedError(Exception):
+    """No refresh token for the bot account (neither env var nor dashboard connection)."""
 
 
 class DriveClient(Protocol):
@@ -54,24 +66,57 @@ class DriveClient(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class OwnerDriveClient(DriveClient, Protocol):
+    def create_permission(self, file_id: str, email: str, role: str) -> str:
+        """Share `file_id` with `email` without a notification email; return the permission id."""
+        ...
+
+    def delete_permission(self, file_id: str, permission_id: str) -> None: ...
+
+
+def check_create_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    extra = set(metadata) - CREATE_METADATA_KEYS
+    if extra:
+        raise ValueError(f"refusing to send metadata keys {sorted(extra)}")
+    parents = metadata.get("parents")
+    if not isinstance(parents, list) or len(parents) != 1:
+        raise ValueError("create needs exactly one parent")
+    return dict(metadata)
+
+
+def check_update_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Only rename and trash are allowed; `parents` and anything else is rejected."""
+    metadata = dict(metadata or {})
+    extra = set(metadata) - UPDATE_METADATA_KEYS
+    if extra:
+        raise ValueError(f"refusing to send metadata keys {sorted(extra)}")
+    return metadata
+
+
 class CredentialsProvider(Protocol):
     def __call__(self, settings: Settings) -> Any: ...
 
 
-def _oauth_bot_credentials(settings: Settings) -> Any:
+def oauth_credentials(settings: Settings, refresh_token: str) -> Any:
     from google.oauth2.credentials import Credentials
 
     assert settings.google_oauth_client_id is not None
     assert settings.google_oauth_client_secret is not None
-    assert settings.google_oauth_refresh_token is not None
     return Credentials(
         token=None,
-        refresh_token=settings.google_oauth_refresh_token.get_secret_value(),
+        refresh_token=refresh_token,
         client_id=settings.google_oauth_client_id.get_secret_value(),
         client_secret=settings.google_oauth_client_secret.get_secret_value(),
         token_uri=TOKEN_URI,
         scopes=[DRIVE_SCOPE],
     )
+
+
+def _oauth_bot_credentials(settings: Settings) -> Any:
+    refresh_token = settings.env_bot_refresh_token
+    if refresh_token is None:
+        raise BotNotConnectedError("GOOGLE_OAUTH_REFRESH_TOKEN is not set")
+    return oauth_credentials(settings, refresh_token)
 
 
 # A `service_account` provider can be registered here later.
@@ -175,7 +220,7 @@ class GoogleDriveClient:
         files = self._service().files()
         return self._execute(
             files.create(
-                body=metadata,
+                body=check_create_metadata(metadata),
                 media_body=self._media(content, content_mime),
                 fields=fields,
                 supportsAllDrives=True,
@@ -194,9 +239,120 @@ class GoogleDriveClient:
         return self._execute(
             files.update(
                 fileId=file_id,
-                body=metadata or {},
+                body=check_update_metadata(metadata),
                 media_body=self._media(content, content_mime),
                 fields=fields,
                 supportsAllDrives=True,
             )
+        )
+
+
+class GoogleOwnerDriveClient(GoogleDriveClient):
+    """The owner's Drive, used only by the dashboard (browse, grant, revoke)."""
+
+    def create_permission(self, file_id: str, email: str, role: str) -> str:
+        permissions = self._service().permissions()
+        resp = self._execute(
+            permissions.create(
+                fileId=file_id,
+                body={"type": "user", "role": role, "emailAddress": email},
+                sendNotificationEmail=False,
+                supportsAllDrives=True,
+                fields="id",
+            )
+        )
+        return str(resp["id"])
+
+    def delete_permission(self, file_id: str, permission_id: str) -> None:
+        permissions = self._service().permissions()
+        self._execute(
+            permissions.delete(fileId=file_id, permissionId=permission_id, supportsAllDrives=True)
+        )
+
+
+class LazyBotDriveClient:
+    """DriveClient for the bot whose refresh token is looked up on use.
+
+    The env var GOOGLE_OAUTH_REFRESH_TOKEN wins; otherwise the token stored by the
+    dashboard's /connect-bot flow is used (re-read at most every `ttl` seconds).
+    """
+
+    def __init__(
+        self,
+        env_token: str | None,
+        stored_token: Callable[[], str | None],
+        factory: Callable[[str], DriveClient],
+        ttl: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self._env_token = env_token
+        self._stored_token = stored_token
+        self._factory = factory
+        self._ttl = ttl
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._checked: tuple[float, str | None] | None = None
+        self._client: tuple[str, DriveClient] | None = None
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._checked = None
+
+    def current_token(self) -> str | None:
+        if self._env_token:
+            return self._env_token
+        now = self._clock()
+        with self._lock:
+            if self._checked is not None and self._checked[0] > now:
+                return self._checked[1]
+        token = self._stored_token()
+        with self._lock:
+            self._checked = (now + self._ttl, token)
+        return token
+
+    def _inner(self) -> DriveClient:
+        token = self.current_token()
+        if not token:
+            raise BotNotConnectedError("the bot account is not connected")
+        with self._lock:
+            if self._client is not None and self._client[0] == token:
+                return self._client[1]
+        client = self._factory(token)
+        with self._lock:
+            self._client = (token, client)
+        return client
+
+    def get_file(self, file_id: str, fields: str) -> dict[str, Any]:
+        return self._inner().get_file(file_id, fields)
+
+    def list_files(
+        self, q: str, fields: str, page_size: int, page_token: str | None = None
+    ) -> dict[str, Any]:
+        return self._inner().list_files(q, fields, page_size, page_token)
+
+    def export(self, file_id: str, mime_type: str) -> bytes:
+        return self._inner().export(file_id, mime_type)
+
+    def download(self, file_id: str, max_bytes: int) -> bytes:
+        return self._inner().download(file_id, max_bytes)
+
+    def create(
+        self,
+        metadata: dict[str, Any],
+        content: bytes | None,
+        content_mime: str | None,
+        fields: str,
+    ) -> dict[str, Any]:
+        return self._inner().create(check_create_metadata(metadata), content, content_mime, fields)
+
+    def update(
+        self,
+        file_id: str,
+        metadata: dict[str, Any] | None,
+        content: bytes | None,
+        content_mime: str | None,
+        fields: str,
+    ) -> dict[str, Any]:
+        return self._inner().update(
+            file_id, check_update_metadata(metadata), content, content_mime, fields
         )

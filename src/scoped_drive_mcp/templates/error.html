@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Problem{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Something went wrong</h1>
+  <p>{{ message }}</p>
+  <p><a href="/">Back to the dashboard</a>{% if not owner %} · <a href="/login">Sign in</a>{% endif %}</p>
+</div>
+{% endblock %}

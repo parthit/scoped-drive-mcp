@@ -2,14 +2,21 @@ import hashlib
 
 import pytest
 
+from scoped_drive_mcp.access import AccessRequests, AccessService
 from scoped_drive_mcp.config import Settings
 from scoped_drive_mcp.drive_client import FOLDER_MIME, SHORTCUT_MIME
 from scoped_drive_mcp.scope import ScopeGuard
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.service import DOC_MIME, SHEET_MIME, DriveService
+from scoped_drive_mcp.store import MemoryStore, PrefixedStore
 from tests.fake_drive import FakeDrive
 
 ROOT = "root-folder-0001"
+BASE_URL = "https://drive-test.example.com"
+OWNER_EMAIL = "owner@example.com"
+BOT_EMAIL = "bot@example.com"
+SESSION_SECRET = "s" * 48
+ENCRYPTION_KEY = "q8vZ5sV4m9kq3Z2o6Xb1d0eQyL7tWcR8nH5gJ2aK3pE="
 
 TOKENS = {
     "viewer": "viewer-secret-token",
@@ -69,6 +76,11 @@ def make_settings(**overrides) -> Settings:
         "scope_cache_ttl": 60,
         "max_bytes": 4096,
         "max_chars": 2000,
+        "owner_email": OWNER_EMAIL,
+        "bot_email": BOT_EMAIL,
+        "app_base_url": BASE_URL,
+        "session_secret": SESSION_SECRET,
+        "encryption_key": ENCRYPTION_KEY,
     }
     values.update(overrides)
     return Settings(**values)
@@ -105,11 +117,22 @@ def service(drive: FakeDrive, guard: ScopeGuard, settings: Settings) -> DriveSer
 
 
 @pytest.fixture
+def requests_store() -> AccessRequests:
+    return AccessRequests(PrefixedStore(MemoryStore()))
+
+
+@pytest.fixture
+def access(requests_store: AccessRequests, guard: ScopeGuard, service: DriveService):
+    return AccessService(requests_store, BASE_URL, guard, service.peek_name)
+
+
+@pytest.fixture
 def app(drive: FakeDrive, settings: Settings, clock: FakeClock):
     return build_app(
         settings,
         drive,
-        guard_factory=lambda d, s: ScopeGuard(
-            d, s.root_folder_id, ttl=s.scope_cache_ttl, clock=clock
+        guard_factory=lambda d, s, allow: ScopeGuard(
+            d, s.root_folder_id, ttl=s.scope_cache_ttl, allowlist=allow, clock=clock
         ),
+        store=MemoryStore(),
     )

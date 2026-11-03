@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Requests{% endblock %}
+{% macro table(items) %}
+<table>
+  <thead><tr><th>Asked for</th><th>Token</th><th>Tool</th><th>Created</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for r in items %}
+  <tr>
+    <td>{{ r.file_name or r.description or r.file_id }}</td>
+    <td class="muted">{{ r.token_name or "—" }}</td>
+    <td class="muted">{{ r.tool }}</td>
+    <td class="muted">{{ r.created_at }}</td>
+    <td><span class="pill {{ 'pending' if r.status == 'pending' else ('ok' if r.status == 'approved' else 'bad') }}">{{ r.status }}</span></td>
+    <td style="text-align:right"><a href="/requests/{{ r.id }}">Open</a></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">None.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+{% block content %}
+<h1>Access requests</h1>
+<h2>Pending</h2>
+{{ table(pending) }}
+<h2>Recent decisions</h2>
+{{ table(decided) }}
+<p class="muted">Requests expire after 7 days.</p>
+{% endblock %}

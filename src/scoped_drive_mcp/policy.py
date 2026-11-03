@@ -1,21 +1,32 @@
 """Role-to-tool map and the `require(tool)` decorator that enforces it and writes the audit log."""
 
 import functools
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, ParamSpec, TypeVar
 
+import anyio.to_thread
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
 
 from .audit import audit
 from .auth import Principal, current_principal
 from .config import Role
-from .scope import ForbiddenError, InvalidInputError
+from .drive_client import BotNotConnectedError
+from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
 
 logger = logging.getLogger(__name__)
 
 VIEWER_TOOLS: frozenset[str] = frozenset(
-    {"search_files", "list_folder", "get_metadata", "read_file"}
+    {
+        "search_files",
+        "list_folder",
+        "get_metadata",
+        "read_file",
+        "request_access",
+        "check_access_request",
+    }
 )
 EDITOR_TOOLS: frozenset[str] = VIEWER_TOOLS | {
     "create_folder",
@@ -34,7 +45,10 @@ ROLE_TOOLS: dict[Role, frozenset[str]] = {
 
 ALL_TOOLS = ADMIN_TOOLS
 
-_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id")
+_AUDITED_ID_ARGS = ("file_id", "folder_id", "parent_id", "request_id")
+
+# (file_id, tool, token_name) -> access_required payload; runs in a worker thread.
+ScopeDeniedHandler = Callable[[str, str, str | None], dict[str, Any]]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -61,9 +75,21 @@ def check_permission(principal: Principal | None, tool: str) -> Principal:
     return principal
 
 
-def require(tool: str) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
+def access_required_result(payload: dict[str, Any]) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload))],
+        structuredContent=payload,
+        isError=True,
+    )
+
+
+def require(
+    tool: str, *, on_scope_denied: ScopeDeniedHandler | None = None
+) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Wrap an async tool: check the caller's role, audit the call, and map errors.
 
+    Role denials are plain errors. Scope denials (OutOfScopeError) become an
+    `access_required` tool error with an approval link when `on_scope_denied` is set.
     The wrapper keeps the original signature (via functools.wraps) so FastMCP still
     generates the right input schema.
     """
@@ -90,12 +116,30 @@ def require(tool: str) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awai
 
             try:
                 result = await fn(*args, **kwargs)
+            except OutOfScopeError as exc:
+                audit(tool=tool, decision="deny", reason="out_of_scope", **who, **ids)
+                if on_scope_denied is None:
+                    raise ToolError(f"Forbidden: {exc}") from None
+                try:
+                    payload = await anyio.to_thread.run_sync(
+                        on_scope_denied, exc.file_id, tool, who["token_name"]
+                    )
+                except Exception:
+                    logger.exception("could not record an access request")
+                    raise ToolError(f"Forbidden: {exc}") from None
+                return access_required_result(payload)  # type: ignore[return-value]
             except ForbiddenError as exc:
                 audit(tool=tool, decision="deny", reason=str(exc), **who, **ids)
                 raise ToolError(f"Forbidden: {exc}") from None
             except InvalidInputError as exc:
                 audit(tool=tool, decision="error", reason=str(exc), **who, **ids)
                 raise ToolError(f"Invalid input: {exc}") from None
+            except BotNotConnectedError:
+                audit(tool=tool, decision="error", reason="bot_not_connected", **who, **ids)
+                raise ToolError(
+                    "The Drive bot account is not connected yet. Ask the owner to open the "
+                    "dashboard and use 'Connect bot'."
+                ) from None
             except Exception as exc:
                 audit(tool=tool, decision="error", reason=type(exc).__name__, **who, **ids)
                 logger.exception("tool %s failed", tool)
