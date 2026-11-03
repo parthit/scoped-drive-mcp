@@ -194,6 +194,19 @@ def test_list_folder_without_id_lists_allowlisted_items(grants, p2_service) -> N
     assert inside == {"proj-sub", "proj-notes", "proj-shortcut"}
 
 
+def test_ticked_items_do_not_reveal_their_parents(grants, p2_service, world) -> None:
+    world.add("two-homes", "two homes.txt", "text/plain", ["proj", "priv"], b"x", owner=OWNER_EMAIL)
+    grants.grant("proj")
+    grants.grant("loose-doc")
+    top = p2_service.list_folder()["files"]
+    assert all("parents" not in f for f in top)  # both live in the owner's My Drive root
+    assert "parents" not in p2_service.get_metadata("proj")
+    assert p2_service.get_metadata("two-homes")["parents"] == ["proj"]
+    grants.grant("priv")
+    assert p2_service.get_metadata("two-homes")["parents"] == ["proj", "priv"]
+    assert "owner-root" not in str(p2_service.search_files("memo"))
+
+
 def test_default_create_parent(grants, p2_service) -> None:
     with pytest.raises(InvalidInputError):
         p2_service.create_folder("x")

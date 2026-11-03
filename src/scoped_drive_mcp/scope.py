@@ -235,6 +235,17 @@ class ScopeGuard:
             frontier = next_frontier
         return False
 
+    def parent_in_scope(self, parent_id: str) -> bool:
+        """Whether a folder id may be shown to the assistant (it is allowed or inside an
+        allowed item). Ids outside the scope would leak the owner's folder structure."""
+        allowed = self.allowed()
+        if parent_id in allowed:
+            return True
+        ref = self._ancestor(parent_id)
+        if ref is None or ref.trashed or ref.id != parent_id:
+            return False
+        return self._reaches_allowed(ref, allowed)
+
     def assert_in_scope(
         self, file_id: str, *, allow_root: bool = True, ref: FileRef | None = None
     ) -> FileRef:
