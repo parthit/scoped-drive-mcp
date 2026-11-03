@@ -43,7 +43,7 @@ Access is limited at two levels:
 1. **Google:** the Google identity the server uses can only see the allowed folder or Shared Drive.
 2. **The server:** every tool call checks the caller's role and confirms the file is inside the allowed folder before calling Drive.
 
-## Execution flow
+## Execution flow (phase 1)
 
 ```mermaid
 flowchart LR
@@ -121,3 +121,109 @@ flowchart LR
   - Ask for a file inside the folder: it should succeed.
   - Ask for a file outside the folder by its ID: it should return a forbidden error.
   - Use a viewer token to attempt a write: it should be denied.
+---
+
+## Phase 2: Drive picker dashboard, allowlist and access requests
+
+Status: implemented on branch `cursor/phase-2-drive-picker-3e39`. Deployment, Upstash provisioning and secrets are
+done by the coordinator.
+
+### Goal
+
+The owner opens a web page, signs in with their own Google account, browses their whole My Drive and ticks the
+folders and files Grok may use. Grok reaches only ticked items (and the contents of ticked folders). Anything
+else returns an `access_required` error with an approval link; the owner approves or denies it, and can untick
+(revoke) at any time.
+
+```mermaid
+flowchart LR
+    Grok -->|"Bearer token"| MCP["/mcp (BearerAuthMiddleware)"]
+    MCP --> Role["role check"] --> Guard["allowlist scope guard"] --> BotDrive["Drive API as BOT"]
+    Guard -->|"out of scope"| Req["access request (Redis, 7-day TTL)"]
+    Owner["Owner browser"] -->|"session cookie + CSRF"| Dash["dashboard (Starlette + Jinja2)"]
+    Dash -->|"owner token"| OwnerDrive["Drive API as OWNER: browse, permissions.create/delete"]
+    Dash --> Redis[("Upstash Redis: allowlist, requests, encrypted tokens, activity")]
+    Guard --> Redis
+```
+
+### Enforcement: bot share + server allowlist (both layers)
+
+- **Grant:** with the owner's token, `permissions.create(type=user, emailAddress=BOT_EMAIL, role=writer,
+  sendNotificationEmail=false)`; store `{id, name, mime_type, permission_id, granted_at, request_id}` in the
+  Redis hash `sdm:allowlist`. Granting a shortcut grants its target.
+- **Revoke:** remove the allowlist entry first, then `permissions.delete(permission_id)` (a 404 is ignored; any
+  other failure is shown to the owner with instructions).
+- **Scope rule:** in scope if the id is allowlisted, or walking up `parents` with the bot's credentials reaches
+  an allowlisted id. Missing/invisible parents stop the walk (out of scope). Cycle, depth and lookup caps and
+  the ancestor cache (`SCOPE_CACHE_TTL`) are unchanged. `ROOT_FOLDER_ID` is optional and, if set, an extra
+  allowlisted folder.
+- **Multi-parent rule:** in scope if ANY parent chain reaches an allowlisted id. The bot only sees the file if
+  the owner shared it, so this does not widen what Google allows.
+- **Freshness:** the allowlist is re-read at most every `ALLOWLIST_CACHE_TTL` seconds (default 2, max 10), and
+  invalidated immediately on the instance that performed a grant/revoke.
+- **Protected items:** allowlisted items cannot be renamed or trashed; a directly granted file may still have its
+  content updated by an editor token.
+- **Search:** fixed-template queries over all folders under allowlisted folders, plus one unrestricted query whose
+  results are accepted only if their id is an individually allowlisted file. Every result is re-checked.
+- **list_folder()** with no id lists the allowlisted items.
+- **Creates without parent_id** go to `ROOT_FOLDER_ID`, else the only allowlisted folder, else are refused.
+
+### Access requests
+
+- Created only on scope denials (`OutOfScopeError`), never on role denials or malformed input. Stored as
+  `sdm:req:<id>` (JSON, 7-day TTL), deduped through `sdm:req:pending:<file_id>`, indexed in `sdm:requests:index`.
+- Ids are `secrets.token_urlsafe(24)` (192 bits). Records hold file_id, file name (only if the bot can see it),
+  description, tool, token_name, reason, created_at, status, decided_at, granted_id/name.
+- The tool result is `CallToolResult(isError=True)` with `structuredContent = {error: "access_required",
+  request_id, approval_url, file_id, message}` (and the same JSON as text). The file name is not returned to Grok.
+- Viewer tools `request_access(description, reason, file_id?)` and `check_access_request(request_id)`.
+- `/requests/<id>` (owner only): details, Approve with "just this item" or "its parent folder" (not My Drive's
+  root), or Deny. Description-only requests link to `/browse?request=<id>` to pick any item.
+
+### Dashboard and auth
+
+- Pages: `/`, `/browse?folder=&q=`, `/access`, `/requests`, `/requests/<id>`, `/activity`, `/connect-bot`,
+  `/login`, `/auth/login`, `/auth/callback`, `POST /logout`, `POST /grant`, `POST /revoke`,
+  `POST /requests/<id>/approve|deny`, `POST /bot/disconnect`. Server-rendered Jinja2, inline CSS, no JS.
+- One Google OAuth client of type Web application; redirect URI `APP_BASE_URL/auth/callback`; scopes
+  `openid email drive`, `access_type=offline`, `prompt=consent`. The flow (`owner` or `bot`) and a nonce travel
+  in an itsdangerous-signed `state` (10 minutes); the nonce is also in the session and is single-use.
+- The account is checked through the userinfo endpoint (`email_verified` required). Owner flow requires
+  OWNER_EMAIL; bot flow requires an owner session and BOT_EMAIL. Wrong accounts are rejected and their token is
+  revoked. The Drive scope must be granted.
+- Refresh tokens are Fernet-encrypted (ENCRYPTION_KEY) in Redis. The bot token from `/connect-bot` is used when
+  GOOGLE_OAUTH_REFRESH_TOKEN is not set (`LazyBotDriveClient`, re-read every 30 s).
+- Session: Starlette `SessionMiddleware` (signed, httponly, Secure unless APP_BASE_URL is http://localhost,
+  SameSite=Lax, 8 h). CSRF token per session on every POST, plus a same-origin `Origin` check. CSP, frame and
+  referrer headers on every dashboard response.
+- Separation: `/mcp` is its own ASGI app behind `BearerAuthMiddleware`; the dashboard is mounted separately and
+  never reads the Authorization header. Neither accepts the other's credential.
+- Activity: every audit line goes to stdout and to the capped Redis list `sdm:activity` (500).
+
+### Settings
+
+Required (reported by `/health` when missing): `API_TOKENS` (hard requirement), `GOOGLE_OAUTH_CLIENT_ID`,
+`GOOGLE_OAUTH_CLIENT_SECRET`, `OWNER_EMAIL`, `BOT_EMAIL`, `APP_BASE_URL`, `SESSION_SECRET`, `ENCRYPTION_KEY`,
+`UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` (or `KV_REST_API_URL`/`KV_REST_API_TOKEN`).
+Optional: `GOOGLE_OAUTH_REFRESH_TOKEN`, `ROOT_FOLDER_ID`, `AUTH_MODE`, `MAX_BYTES`, `MAX_CHARS`,
+`SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL`. Without Redis an in-memory store is used (local development only).
+`/health` reports missing names, `store`, `owner_connected`, `bot_connected` and `bot_source`, never values.
+
+### Phase-1 risks re-checked
+
+- **Shortcuts:** no code path reads `shortcutDetails.targetId`; shortcuts can't be listed or used as parents;
+  tests assert the target is never fetched or downloaded.
+- **Parents:** `check_update_metadata` allows only `name`/`trashed`; `check_create_metadata` requires exactly one
+  parent and no other keys; `addParents`/`removeParents` are never sent. Enforced in the Google client, the lazy
+  bot client and the fake Drive.
+- **Also fixed:** `ToolError` raised inside a tool is no longer turned into a generic failure; blank env values
+  (as in `.env.example`) count as unset.
+
+### Verification
+
+- `pytest` (no network): fake Drive with owner and bot views, in-memory store, fake OAuth. Covers grant/revoke,
+  nested scope, revocation timing, access_required shape and dedupe, approve/deny, the two request tools, owner
+  and bot sign-in restrictions, CSRF, credential separation, shortcuts and parents.
+- Local uvicorn smoke test: logged-out pages redirect to `/login`, `/mcp` rejects missing tokens and the
+  dashboard cookie, and initialize/tools/list/tools/call work with a token.
+- Live (coordinator): the README walkthrough steps 1-7.
