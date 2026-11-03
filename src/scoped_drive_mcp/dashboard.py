@@ -40,7 +40,7 @@ from .drive_client import (
 )
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .oauth import OAuthClient, OAuthError
-from .scope import InvalidInputError, clean_search_text, validate_drive_id
+from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
 
 logger = logging.getLogger(__name__)
@@ -446,7 +446,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                     node = drive.get_file(str(parents[0]), fields=OWNER_FIELDS)
                 except DriveNotFoundError:
                     node = None
-            query = f"'{folder_id}' in parents and trashed=false"
+            query = f"{parents_clause([folder_id])} and trashed=false"
             resp = drive.list_files(
                 query, fields=OWNER_FIELDS, page_size=BROWSE_PAGE_SIZE, page_token=page_token
             )

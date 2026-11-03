@@ -134,6 +134,9 @@ def require(
             except InvalidInputError as exc:
                 audit(tool=tool, decision="error", reason=str(exc), **who, **ids)
                 raise ToolError(f"Invalid input: {exc}") from None
+            except ToolError as exc:
+                audit(tool=tool, decision="error", reason=str(exc), **who, **ids)
+                raise
             except BotNotConnectedError:
                 audit(tool=tool, decision="error", reason="bot_not_connected", **who, **ids)
                 raise ToolError(
