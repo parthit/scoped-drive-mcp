@@ -1,5 +1,7 @@
 """Owner dashboard: sign-in, bot connection, CSRF, separation from /mcp, browse/grant/revoke."""
 
+import re
+
 import pytest
 
 from scoped_drive_mcp.dashboard import SESSION_COOKIE
@@ -140,6 +142,54 @@ def test_logout(owner_c) -> None:
     r = post(owner_c, "/logout")
     assert r.status_code == 303
     assert owner_c.get("/").status_code == 303
+
+
+# HTML form POST is a non-cors navigation. These policies leave Origin as the
+# document origin; `no-referrer` replaces it with the literal "null", which
+# check_csrf rejects even when the session token is present.
+_FORM_POST_KEEPS_ORIGIN = frozenset(
+    {
+        "same-origin",
+        "origin",
+        "origin-when-cross-origin",
+        "strict-origin",
+        "strict-origin-when-cross-origin",
+        "no-referrer-when-downgrade",
+    }
+)
+_LOGOUT_FORM = re.compile(
+    r'<form class="inline" method="post" action="/logout">\s*'
+    r'<input type="hidden" name="csrf" value="([^"]+)">'
+)
+
+
+def _browser_form_origin(policy: str) -> str:
+    """Origin header a browser attaches to a same-origin HTML form POST under `policy`."""
+    if policy in _FORM_POST_KEEPS_ORIGIN:
+        return BASE_URL
+    return "null"
+
+
+def test_logout_form_post_as_the_browser(owner_c) -> None:
+    """Sign out via the dashboard form, with the Origin a browser would send."""
+    page = owner_c.get("/")
+    assert page.status_code == 200
+    match = _LOGOUT_FORM.search(page.text)
+    assert match, "signed-in page has no logout form"
+    origin = _browser_form_origin(page.headers["referrer-policy"])
+
+    logged_out = owner_c.post("/logout", data={"csrf": match.group(1)}, headers={"Origin": origin})
+    assert logged_out.status_code == 303, logged_out.text
+    assert logged_out.headers["location"] == "/login"
+    home = owner_c.get("/")
+    assert home.status_code == 303
+    assert home.headers["location"].startswith("/login")
+
+    login(owner_c)
+    denied = owner_c.post("/logout", headers={"Origin": origin})
+    assert denied.status_code == 403
+    assert denied.text == "CSRF check failed."
+    assert owner_c.get("/").status_code == 200
 
 
 def test_session_for_other_owner_is_ignored(p2_app, world, memstore, oauth) -> None:

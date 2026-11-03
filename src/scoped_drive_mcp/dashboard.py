@@ -63,7 +63,12 @@ _env = Environment(
 SECURITY_HEADERS = [
     (b"x-frame-options", b"DENY"),
     (b"x-content-type-options", b"nosniff"),
-    (b"referrer-policy", b"no-referrer"),
+    # `no-referrer` makes browsers send `Origin: null` on HTML form POSTs (Fetch:
+    # non-GET, non-cors). check_csrf treats that as a cross-origin request, so a
+    # signed-in Sign out fails before the session token is compared. `same-origin`
+    # still withholds the referrer from other sites, and a same-origin form POST
+    # carries this app's origin.
+    (b"referrer-policy", b"same-origin"),
     (b"cache-control", b"no-store"),
     (
         b"content-security-policy",

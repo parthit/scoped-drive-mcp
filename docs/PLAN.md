@@ -195,7 +195,8 @@ flowchart LR
   GOOGLE_OAUTH_REFRESH_TOKEN is not set (`LazyBotDriveClient`, re-read every 30 s).
 - Session: Starlette `SessionMiddleware` (signed, httponly, Secure unless APP_BASE_URL is http://localhost,
   SameSite=Lax, 8 h). CSRF token per session on every POST, plus a same-origin `Origin` check. CSP, frame and
-  referrer headers on every dashboard response.
+  referrer headers on every dashboard response. Referrer-Policy is `same-origin`: `no-referrer` would make
+  browsers send `Origin: null` on form posts (including logout) and fail that check.
 - Separation: `/mcp` is its own ASGI app behind `BearerAuthMiddleware`; the dashboard is mounted separately and
   never reads the Authorization header. Neither accepts the other's credential.
 - Activity: every audit line goes to stdout and to the capped Redis list `sdm:activity` (500).
