@@ -439,6 +439,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     # ---- pages -----------------------------------------------------------
 
+    async def home(request: Request) -> Response:
+        # Logged-out visitors get the public page linked from the Google consent screen.
+        if not is_owner(request, settings):
+            return render_plain("home.html")
+        return await overview(request)
+
     async def overview(request: Request) -> Response:
         def gather() -> dict[str, Any]:
             entries = ctx.allowlist.entries()
@@ -804,7 +810,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
-        Route("/", owner_only(overview), methods=["GET"]),
+        Route("/", home, methods=["GET"]),
         Route("/connect-bot", owner_only(connect_bot_page), methods=["GET"]),
         Route("/connect-bot", csrf_protected(connect_bot_start), methods=["POST"]),
         Route("/bot/disconnect", csrf_protected(bot_disconnect), methods=["POST"]),

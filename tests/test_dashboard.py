@@ -11,7 +11,6 @@ from tests.conftest import BASE_URL, BOT_EMAIL, OWNER_EMAIL, TOKENS, make_settin
 from tests.dash import MCP_HEADERS, client, csrf, login, mcp_call, post, start_oauth
 
 OWNER_PAGES = [
-    "/",
     "/browse",
     "/browse?folder=proj",
     "/access",
@@ -69,9 +68,21 @@ def test_login_page_is_public(c) -> None:
     assert 'href="/terms"' in r.text and 'href="/privacy"' in r.text
 
 
+def test_public_home_is_the_consent_screen_page(c) -> None:
+    r = c.get("/")
+    assert r.status_code == 200
+    assert "gateway that sits in front of Google Drive" in r.text
+    assert 'href="/privacy"' in r.text and 'href="/terms"' in r.text
+    assert "Sign in with Google" in r.text
+    assert "set-cookie" not in {name.lower() for name in r.headers}
+
+
 @pytest.mark.parametrize(
     ("path", "needle"),
-    [("/terms", "gateway that sits in front of Google Drive"), ("/privacy", "allowlist")],
+    [
+        ("/terms", "gateway that sits in front of Google Drive"),
+        ("/privacy", "Limited Use requirements"),
+    ],
 )
 def test_legal_pages_are_public(c, path: str, needle: str) -> None:
     r = c.get(path)
@@ -122,7 +133,7 @@ def test_wrong_account_cannot_sign_in(c, oauth, memstore, code: str) -> None:
     r = login(c, code)
     assert r.status_code == 403
     assert "not allowed" in r.text
-    assert c.get("/").status_code == 303  # still logged out
+    assert c.get("/browse").status_code == 303  # still logged out
     assert memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY) is None
     assert oauth.revoked  # the unwanted token was revoked
 
@@ -156,7 +167,7 @@ def test_drive_scope_required(c, oauth) -> None:
 def test_logout(owner_c) -> None:
     r = post(owner_c, "/logout")
     assert r.status_code == 303
-    assert owner_c.get("/").status_code == 303
+    assert owner_c.get("/browse").status_code == 303
 
 
 # HTML form POST is a non-cors navigation. These policies leave Origin as the
@@ -197,8 +208,9 @@ def test_logout_form_post_as_the_browser(owner_c) -> None:
     assert logged_out.status_code == 303, logged_out.text
     assert logged_out.headers["location"] == "/login"
     home = owner_c.get("/")
-    assert home.status_code == 303
-    assert home.headers["location"].startswith("/login")
+    assert home.status_code == 200 and "Privacy policy" in home.text
+    assert "Sign out" not in home.text
+    assert owner_c.get("/browse").headers["location"].startswith("/login")
 
     login(owner_c)
     denied = owner_c.post("/logout", headers={"Origin": origin})
@@ -220,7 +232,7 @@ def test_session_for_other_owner_is_ignored(p2_app, world, memstore, oauth) -> N
     )
     c2 = client(other)
     c2.cookies.set(SESSION_COOKIE, cookie)
-    assert c2.get("/").status_code == 303
+    assert c2.get("/browse").status_code == 303
 
 
 # ---- bot connection ----------------------------------------------------------------

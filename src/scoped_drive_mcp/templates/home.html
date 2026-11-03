@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<div class="card" style="max-width:640px;">
+  <h1>Scoped Drive</h1>
+  <p>Scoped Drive is a gateway that sits in front of Google Drive.</p>
+  <p>Drive’s API does not give an app a fine-grained way to share only certain files and
+     folders. An app that signs in receives a broad Drive permission. This server is the
+     missing control: you tick the files and folders an assistant may use, and every call
+     is checked against that list before it reaches Drive.</p>
+  <p>Only the Google account configured as the owner can sign in. An assistant reaches
+     Drive only through a connection that owner created, and only for the items that
+     owner allowed.</p>
+  <p><a class="btn primary" href="/login">Sign in with Google</a></p>
+  <p>These pages are linked from the Google sign-in screen:
+     <a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a>.</p>
+</div>
+{% endblock %}

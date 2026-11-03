@@ -2,7 +2,8 @@
 {% block title %}Privacy{% endblock %}
 {% block content %}
 <div class="card">
-  <h1>Privacy</h1>
+  <h1>Privacy policy</h1>
+  <p>This is the privacy policy linked from the Google sign-in screen for Scoped Drive.</p>
   <p>Scoped Drive is a gateway in front of Google Drive. Drive’s API has no fine-grained
      control for sharing only selected files and folders with an app, so this server asks
      for broad Drive access and then enforces the list you tick yourself.</p>
@@ -10,15 +11,20 @@
      open the dashboard is the owner account configured for it.</p>
 
   <h2>Google data we use</h2>
-  <p>When you sign in, Google tells us the account’s email address and whether that email
-     is verified. We use that only to check that the account is the configured owner, or,
-     if you connect a separate bot account, that bot account. We do not ask for your name,
-     contacts, or other profile information.</p>
-  <p>Sign-in also requests full Google Drive access
-     (<code>https://www.googleapis.com/auth/drive</code>). We request that scope because
-     Drive does not offer a permission for “only these files and folders.” After you
-     approve it, this server applies its own limit: an assistant can only list, read, or
-     change items you have ticked, or items inside a folder you have ticked.</p>
+  <p>Sign-in requests these Google permissions, and no others:</p>
+  <ul>
+    <li><code>openid</code> and <code>email</code>, to read the account’s email address and
+        whether Google has verified it. We use that only to check that the account is the
+        configured owner or, if you connect a separate bot account, that bot account.
+        We do not ask for your name, contacts, or other profile information.</li>
+    <li><code>https://www.googleapis.com/auth/drive</code>, full access to Drive. Drive
+        does not offer a permission for “only these files and folders.” The narrower
+        <code>drive.file</code> scope only covers files this app created or that you pick
+        one at a time, so it cannot keep an existing folder available to the assistant.
+        After you approve the broad scope, this server applies its own limit: an assistant
+        can only list, read, or change items you have ticked, or items inside a folder you
+        have ticked.</li>
+  </ul>
   <p>What an assistant can do depends on the role of the connection you gave it. That can
      include search, reading text, creating files and folders, editing, renaming, and
      moving an item to Drive’s trash. There is no tool here to permanently delete a file,
@@ -59,12 +65,21 @@
   <p>The app runs on Vercel. The encrypted token, allowlist, requests, and activity log
      are stored in Upstash Redis. Those providers keep that data so the gateway can run.
      They are not given your Drive as a product of their own.</p>
-  <p>We do not sell Google user data. We do not use it for advertising, and we do not use
-     it to train a model. Google user data is used only to run this gateway: check the
-     list you set, call Drive for the items you allowed, and return the result to the
-     assistant you connected. It is not passed to anyone else, except to keep the
-     service secure or if the law requires it. This server has no page that shows file
-     contents, and the activity log does not contain them.</p>
+  <h2>Limited use of Google user data</h2>
+  <p>Scoped Drive’s use and transfer of information received from Google APIs adheres to
+     the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google
+     API Services User Data Policy</a>, including the Limited Use requirements.</p>
+  <p>Google user data is used only to provide this gateway, which is the feature shown on
+     the <a href="/">home page</a>: check the list you set, call Drive for the items you
+     allowed, and return the result to the assistant you connected. That assistant is the
+     only destination for file contents. Sending a result there is the feature you turned
+     on by connecting it and ticking those items.</p>
+  <p>We do not sell Google user data. We do not use it for advertising, credit, lending,
+     or to train a model. We do not pass it to anyone other than that assistant, except
+     to keep the service secure, to comply with the law, or as part of a transfer of this
+     deployment after you agree. This server has no page that shows file contents to a
+     person, and the activity log does not contain them. People do not read those contents
+     unless you ask, or it is required for security or by law.</p>
 
   <h2>Your choices</h2>
   <p>Sign out, untick items, disconnect the bot or the assistant, or remove this app’s

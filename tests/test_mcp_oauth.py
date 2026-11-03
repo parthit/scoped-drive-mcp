@@ -412,7 +412,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     assert dashboard.status_code == 200
     assert "Local test" in dashboard.text
     logged_out = client(owner_c.app)
-    opened = logged_out.get("/", headers={"Authorization": f"Bearer {access}"})
+    opened = logged_out.get("/browse", headers={"Authorization": f"Bearer {access}"})
     assert opened.status_code == 303
     assert opened.headers["location"].startswith("/login")
 
