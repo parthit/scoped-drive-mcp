@@ -192,6 +192,8 @@ class AllowEntry:
     permission_id: str | None
     granted_at: str = field(default_factory=utc_now)
     request_id: str | None = None
+    # The bot address `permission_id` belongs to; None when no Drive share was made.
+    shared_with: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -206,6 +208,7 @@ class AllowEntry:
             permission_id=data.get("permission_id"),
             granted_at=str(data.get("granted_at", "")),
             request_id=data.get("request_id"),
+            shared_with=data.get("shared_with"),
         )
 
 

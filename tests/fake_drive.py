@@ -169,6 +169,7 @@ class FakeDrive:
     roots: dict[str, str] = field(default_factory=dict)
     content_calls: list[str] = field(default_factory=list)
     permission_calls: list[tuple] = field(default_factory=list)
+    default_owner: str | None = None
 
     def add(
         self,
@@ -189,14 +190,20 @@ class FakeDrive:
             list(parents),
             content,
             trashed,
-            owner=owner,
+            owner=owner if owner is not None else self.default_owner,
             shortcut_target=shortcut_target,
         )
         self.files[file_id] = f
         return f
 
     def as_user(self, email: str) -> "FakeDrive":
-        return FakeDrive(files=self.files, viewer=email, roots=self.roots, _ids=self._ids)
+        return FakeDrive(
+            files=self.files,
+            viewer=email,
+            roots=self.roots,
+            _ids=self._ids,
+            default_owner=self.default_owner,
+        )
 
     def share(self, file_id: str, email: str, role: str = "writer") -> str:
         pid = f"perm-{next(self._ids):04d}"

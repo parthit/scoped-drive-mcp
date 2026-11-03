@@ -1,13 +1,16 @@
 """Owner-side grant and revoke ("bot share" + server allowlist).
 
-Granting an item shares it with BOT_EMAIL as writer using the OWNER's credentials (no
-notification email) and stores the returned permission id in the allowlist. Revoking
-removes the allowlist entry first (the server stops serving it within
+In separate-bot mode, granting an item shares it with BOT_EMAIL as writer using the OWNER's
+credentials (no notification email) and stores the returned permission id in the allowlist.
+Revoking removes the allowlist entry first (the server stops serving it within
 ALLOWLIST_CACHE_TTL seconds) and then deletes that permission, so Google stops the bot too.
+
+In same-account mode (`bot_email=None`) there is nobody to share with: grant and revoke only
+change the allowlist, which is then the only boundary.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .access import APPROVED, DENIED, AccessRequest, AccessRequests
@@ -37,7 +40,7 @@ class GrantService:
         owner_drive: Callable[[], OwnerDriveClient],
         allowlist: Allowlist,
         requests: AccessRequests,
-        bot_email: str,
+        bot_email: str | None,
         on_change: Callable[[], None] = lambda: None,
     ):
         self._owner_drive = owner_drive
@@ -73,8 +76,26 @@ class GrantService:
         existing = self.allowlist.get(item_id)
         if existing is not None:
             return existing
+        if item_id == self.my_drive_root_id():
+            raise GrantError("Your whole My Drive cannot be shared; pick folders or files in it.")
+        permission_id = self._share(item_id) if self.bot_email else None
+        entry = AllowEntry(
+            id=item_id,
+            name=str(meta.get("name", "")),
+            mime_type=str(meta.get("mimeType", "")),
+            permission_id=permission_id,
+            request_id=request_id,
+            shared_with=self.bot_email if permission_id else None,
+        )
+        self.allowlist.add(entry)
+        self._on_change()
+        audit_owner("grant", file_id=item_id, request_id=request_id)
+        return entry
+
+    def _share(self, item_id: str) -> str:
+        assert self.bot_email is not None
         try:
-            permission_id = self.owner_drive().create_permission(item_id, self.bot_email, "writer")
+            return self.owner_drive().create_permission(item_id, self.bot_email, "writer")
         except DriveNotFoundError:
             raise GrantError("That item was not found in your Drive.") from None
         except Exception as exc:
@@ -82,17 +103,47 @@ class GrantService:
             raise GrantError(
                 "Google refused to share this item with the bot (you may not own it)."
             ) from None
-        entry = AllowEntry(
-            id=item_id,
-            name=str(meta.get("name", "")),
-            mime_type=str(meta.get("mimeType", "")),
-            permission_id=permission_id,
-            request_id=request_id,
-        )
-        self.allowlist.add(entry)
-        self._on_change()
-        audit_owner("grant", file_id=item_id, request_id=request_id)
-        return entry
+
+    def unshared(self) -> list[AllowEntry]:
+        """Allowlisted items not yet shared with the current bot (e.g. ticked in
+        same-account mode before a bot was configured)."""
+        if not self.bot_email:
+            return []
+        return [e for e in self.allowlist.entries().values() if e.shared_with != self.bot_email]
+
+    def share_all(self) -> dict[str, Any]:
+        """Share every allowlisted item with the current bot. Safe to run again: items
+        already shared with this bot are skipped, and a failure leaves the entry as it was."""
+        if not self.bot_email:
+            raise GrantError("Set BOT_EMAIL to a separate account first.")
+        shared: list[str] = []
+        failed: list[dict[str, str]] = []
+        for entry in self.unshared():
+            try:
+                permission_id = self._share(entry.id)
+            except GrantError as exc:
+                failed.append({"id": entry.id, "name": entry.name, "error": str(exc)})
+                continue
+            if entry.permission_id:
+                # Left over from an earlier bot address; that account should lose access.
+                try:
+                    self.owner_drive().delete_permission(entry.id, entry.permission_id)
+                except Exception as exc:
+                    audit_owner("share_all", "error", file_id=entry.id, reason=type(exc).__name__)
+            current = self.allowlist.get(entry.id)
+            if current is None:
+                # Revoked while we were sharing: undo the new share.
+                try:
+                    self.owner_drive().delete_permission(entry.id, permission_id)
+                except Exception:
+                    failed.append({"id": entry.id, "name": entry.name, "error": "revoked"})
+                continue
+            self.allowlist.add(
+                replace(current, permission_id=permission_id, shared_with=self.bot_email)
+            )
+            shared.append(entry.id)
+        audit_owner("share_all", shared=str(len(shared)), failed=str(len(failed)))
+        return {"shared": shared, "failed": failed}
 
     def revoke(self, file_id: str) -> None:
         validate_drive_id(file_id)

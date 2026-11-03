@@ -1,0 +1,10 @@
+{% if mode == "same_account" %}
+<div class="warn" id="mode-warning"><b>Same-account mode.</b> There is no separate bot account
+  (<code>BOT_EMAIL</code> is unset or equals <code>OWNER_EMAIL</code>), so the assistant uses
+  <b>your own</b> Google sign-in, which can reach your whole Drive. Only this server's allowlist keeps
+  it to the items you tick; Google does not enforce anything. For a second, independent wall, create a
+  separate Google account, set <code>BOT_EMAIL</code> to it and connect it.</div>
+{% else %}
+<p class="muted" id="mode-note">Mode: separate bot account (<code>{{ bot_email }}</code>). Ticked items
+  are shared with the bot in Drive and kept on the server's allowlist.</p>
+{% endif %}

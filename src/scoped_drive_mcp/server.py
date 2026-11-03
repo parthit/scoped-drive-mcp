@@ -299,7 +299,10 @@ def build_app(
     audit_module.set_sinks([activity])
 
     def stored_bot_token() -> str | None:
-        record = vault.bot() if vault.enabled else None
+        # Same-account mode: the tools act as the owner, limited only by the allowlist.
+        if not vault.enabled:
+            return None
+        record = vault.owner() if settings.same_account else vault.bot()
         return record.get("t") if record else None
 
     if drive_client is None:
@@ -353,6 +356,7 @@ def build_app(
         missing = settings.missing_settings()
         body: dict[str, Any] = {
             "status": "ok" if not missing else "incomplete",
+            "mode": settings.mode,
             "missing": missing,
             "store": kv.kind,
         }

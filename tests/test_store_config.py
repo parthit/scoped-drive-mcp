@@ -58,7 +58,6 @@ def test_phase2_env(monkeypatch) -> None:
         {"encryption_key": "not-a-fernet-key"},
         {"session_secret": "short"},
         {"owner_email": "not-an-email"},
-        {"bot_email": "owner@example.com"},
         {"app_base_url": "http://scoped.example.com"},
         {"app_base_url": "ftp://x"},
         {"redis_rest_url": "http://insecure.example.com"},

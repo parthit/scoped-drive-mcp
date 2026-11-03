@@ -74,6 +74,12 @@ SECURITY_HEADERS = [
 ]
 
 
+NO_BOT_MESSAGE = (
+    "There is no separate bot account (BOT_EMAIL is unset or equals OWNER_EMAIL), so the "
+    "assistant uses your own sign-in. Set BOT_EMAIL to a different account to use a bot."
+)
+
+
 class OwnerNotConnectedError(Exception):
     """No stored refresh token for the owner (sign in again)."""
 
@@ -102,18 +108,25 @@ class DashboardContext:
         return self._owner_client[1]
 
     def grants(self) -> GrantService:
-        assert self.settings.bot_email is not None
         return GrantService(
             self.owner_drive,
             self.allowlist,
             self.requests,
-            self.settings.bot_email,
+            None if self.settings.same_account else self.settings.bot_email,
             on_change=self.on_allowlist_change,
         )
 
     def bot_status(self) -> dict[str, Any]:
+        """Which Google account the MCP tools act as, and where its token comes from."""
+        same = self.settings.same_account
+        email = self.settings.owner_email if same else self.settings.bot_email
         if self.settings.env_bot_refresh_token:
-            return {"connected": True, "source": "env", "email": self.settings.bot_email}
+            return {"connected": True, "source": "env", "email": email}
+        if same:
+            record = self.vault.owner() if self.vault.enabled else None
+            if record and record.get("t"):
+                return {"connected": True, "source": "owner", "email": record.get("email")}
+            return {"connected": False, "source": None, "email": None}
         record = self.vault.bot() if self.vault.enabled else None
         if record and record.get("t"):
             return {"connected": True, "source": "dashboard", "email": record.get("email")}
@@ -301,6 +314,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 400, message="Invalid sign-in state.")
         if flow == "bot" and not is_owner(request, settings):
             return render(request, "error.html", 403, message="Sign in as the owner first.")
+        if flow == "bot" and settings.same_account:
+            return render(request, "error.html", 400, message=NO_BOT_MESSAGE)
         code = params.get("code")
         if not code:
             return render(request, "error.html", 400, message="Google did not return a code.")
@@ -350,6 +365,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request.session.clear()
             request.session["owner"] = email
             request.session["csrf"] = secrets.token_urlsafe(32)
+            if settings.same_account and isinstance(ctx.bot_drive, LazyBotDriveClient):
+                ctx.bot_drive.invalidate()
             audit_owner("login")
             return RedirectResponse(next_url, status_code=303)
 
@@ -370,9 +387,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def connect_bot_page(request: Request) -> Response:
         status = await blocking(ctx.bot_status)
-        return render(request, "connect_bot.html", bot=status, bot_email=settings.bot_email)
+        return render(
+            request,
+            "connect_bot.html",
+            bot=status,
+            bot_email=settings.bot_email,
+            mode=settings.mode,
+        )
 
     async def connect_bot_start(request: Request, form: dict[str, str]) -> Response:
+        if settings.same_account:
+            flash(request, "error", NO_BOT_MESSAGE)
+            return RedirectResponse("/connect-bot", status_code=303)
         return start_oauth(request, "bot", settings.bot_email)
 
     async def bot_disconnect(request: Request, form: dict[str, str]) -> Response:
@@ -389,9 +415,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         def gather() -> dict[str, Any]:
             entries = ctx.allowlist.entries()
             reqs = ctx.requests.recent(100)
+            bot = ctx.bot_status()
             return {
-                "bot": ctx.bot_status(),
+                "bot": bot,
                 "owner_connected": ctx.owner_connected(),
+                "unshared_count": len(ctx.grants().unshared()) if bot["connected"] else 0,
                 "allow_count": len(entries),
                 "pending_count": sum(1 for r in reqs if r.status == PENDING),
             }
@@ -404,6 +432,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             store_kind=getattr(ctx.store, "kind", "custom"),
             root_folder_id=settings.root_folder_id,
             mcp_url=f"{settings.app_base_url}/mcp",
+            mode=settings.mode,
+            bot_email=settings.bot_email,
             **data,
         )
 
@@ -514,15 +544,44 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
 
     async def access(request: Request) -> Response:
-        entries = await blocking(ctx.allowlist.entries)
-        rows = sorted(entries.values(), key=lambda e: e.granted_at, reverse=True)
+        def gather() -> dict[str, Any]:
+            bot = ctx.bot_status()
+            unshared = ctx.grants().unshared() if bot["connected"] else []
+            return {"entries": ctx.allowlist.entries(), "bot": bot, "unshared": unshared}
+
+        data = await blocking(gather)
+        rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
         return render(
             request,
             "access.html",
             rows=rows,
             root_folder_id=settings.root_folder_id,
             describe_mime=describe_mime,
+            mode=settings.mode,
+            bot=data["bot"],
+            bot_email=settings.bot_email,
+            unshared_ids={e.id for e in data["unshared"]},
         )
+
+    async def share_all_with_bot(request: Request, form: dict[str, str]) -> Response:
+        if settings.same_account:
+            flash(request, "error", NO_BOT_MESSAGE)
+            return RedirectResponse("/access", status_code=303)
+        bot = await blocking(ctx.bot_status)
+        if not bot["connected"]:
+            flash(request, "error", "Connect the bot account first.")
+            return RedirectResponse("/connect-bot", status_code=303)
+        try:
+            result = await blocking(ctx.grants().share_all)
+        except GrantError as exc:
+            flash(request, "error", str(exc))
+            return RedirectResponse("/access", status_code=303)
+        shared, failed = result["shared"], result["failed"]
+        if failed:
+            names = ", ".join(f["name"] or f["id"] for f in failed[:5])
+            flash(request, "error", f"Could not share {len(failed)} item(s) with the bot: {names}.")
+        flash(request, "ok", f"Shared {len(shared)} item(s) with {settings.bot_email}.")
+        return RedirectResponse("/access", status_code=303)
 
     async def requests_page(request: Request) -> Response:
         reqs = await blocking(ctx.requests.recent, 100)
@@ -598,6 +657,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
         Route("/access", owner_only(access), methods=["GET"]),
+        Route("/access/share-bot", csrf_protected(share_all_with_bot), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),

@@ -2,6 +2,15 @@
 {% block title %}Bot account{% endblock %}
 {% block content %}
 <h1>Bot account</h1>
+{% if mode == "same_account" %}
+{% include "_mode.html" %}
+<div class="card">
+  <p>Connecting a bot is optional in this mode. The assistant uses your stored sign-in
+    {% if bot.connected %}(<span class="pill ok">connected</span>{% if bot.source == "env" %} through <code>GOOGLE_OAUTH_REFRESH_TOKEN</code>{% endif %}){% else %}(<span class="pill bad">not stored</span>; sign out and in again){% endif %}.</p>
+  <p>To switch to a separate bot: create another Google account, set <code>BOT_EMAIL</code> to it,
+    redeploy, then come back here to connect it and share your allowed items with it.</p>
+</div>
+{% else %}
 <div class="card">
   <p>The assistant reaches Drive as <b>{{ bot_email }}</b>. Items you grant are shared with this account,
      and the server only uses what is on your allowlist.</p>
@@ -23,4 +32,5 @@
   </form>
   {% endif %}
 </div>
+{% endif %}
 {% endblock %}

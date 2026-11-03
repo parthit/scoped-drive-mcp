@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -201,13 +201,16 @@ class Settings(BaseSettings):
             return parse_api_tokens(value)
         return value
 
-    @model_validator(mode="after")
-    def _check_identities(self) -> "Settings":
-        if self.owner_email and self.owner_email == self.bot_email:
-            raise ValueError("OWNER_EMAIL and BOT_EMAIL must be different accounts")
-        return self
-
     # ---- derived ---------------------------------------------------------
+
+    @property
+    def same_account(self) -> bool:
+        """No separate bot: the MCP tools act as the owner and the allowlist is the only wall."""
+        return self.bot_email is None or self.bot_email == self.owner_email
+
+    @property
+    def mode(self) -> Literal["same_account", "separate_bot"]:
+        return "same_account" if self.same_account else "separate_bot"
 
     @property
     def oauth_client_configured(self) -> bool:
@@ -232,7 +235,6 @@ class Settings(BaseSettings):
             ("GOOGLE_OAUTH_CLIENT_ID", _secret_set(self.google_oauth_client_id)),
             ("GOOGLE_OAUTH_CLIENT_SECRET", _secret_set(self.google_oauth_client_secret)),
             ("OWNER_EMAIL", self.owner_email is not None),
-            ("BOT_EMAIL", self.bot_email is not None),
             ("APP_BASE_URL", self.app_base_url is not None),
             ("SESSION_SECRET", _secret_set(self.session_secret)),
             ("ENCRYPTION_KEY", _secret_set(self.encryption_key)),

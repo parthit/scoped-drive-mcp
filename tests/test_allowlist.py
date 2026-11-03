@@ -237,10 +237,12 @@ def test_search_after_revoke(grants, p2_service) -> None:
     assert p2_service.search_files("roadmap", 10)["count"] == 0
 
 
-def test_root_folder_id_is_an_extra_root(drive, clock, kv) -> None:
+def test_root_folder_id_is_an_extra_root(drive, clock, kv, mode) -> None:
     allowlist = Allowlist(kv)
     from scoped_drive_mcp.store import AllowEntry
 
+    if mode == "separate_bot":
+        drive.share("outside-folder", BOT_EMAIL)  # what ticking it on the dashboard does
     allowlist.add(AllowEntry("outside-folder", "Private", FOLDER_MIME, None))
     guard = ScopeGuard(drive, ROOT, allowlist=allowlist.mime_map, allowlist_ttl=0, clock=clock)
     assert guard.is_in_scope("notes-txt")  # via ROOT_FOLDER_ID

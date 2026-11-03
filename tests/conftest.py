@@ -43,7 +43,13 @@ class FakeClock:
         self.now += seconds
 
 
-def build_tree() -> FakeDrive:
+MODES = ("same_account", "separate_bot")
+
+
+def build_tree(mode: str | None = None) -> FakeDrive:
+    """The phase-1 tree. With `mode`, every file belongs to the owner and the result is the
+    view the MCP tools get: the owner's own (sees everything) in same_account mode, or the
+    bot's, which only sees ROOT because only ROOT is shared with it, in separate_bot mode."""
     d = FakeDrive()
     d.add(ROOT, "Shared With Grok", FOLDER_MIME, ["bot-my-drive-root"])
     d.add("bot-my-drive-root", "My Drive", FOLDER_MIME, [])
@@ -63,7 +69,15 @@ def build_tree() -> FakeDrive:
     d.add("cycle-file", "plan cycle.txt", "text/plain", ["cycle-a"], b"cycle plan")
     d.add("orphan-file", "plan orphan.txt", "text/plain", [], b"orphan plan")
     d.add("dangling-file", "plan dangling.txt", "text/plain", ["missing-parent"], b"dangling")
-    return d
+    if mode is None:
+        return d
+    for f in d.files.values():
+        f.owner = OWNER_EMAIL
+    d.default_owner = OWNER_EMAIL
+    if mode == "same_account":
+        return d.as_user(OWNER_EMAIL)
+    d.share(ROOT, BOT_EMAIL, "writer")
+    return d.as_user(BOT_EMAIL)
 
 
 def make_settings(**overrides) -> Settings:
@@ -96,14 +110,19 @@ def clock() -> FakeClock:
     return FakeClock()
 
 
-@pytest.fixture
-def drive() -> FakeDrive:
-    return build_tree()
+@pytest.fixture(params=MODES)
+def mode(request: pytest.FixtureRequest) -> str:
+    return request.param
 
 
 @pytest.fixture
-def settings() -> Settings:
-    return make_settings()
+def drive(mode: str) -> FakeDrive:
+    return build_tree(mode)
+
+
+@pytest.fixture
+def settings(mode: str) -> Settings:
+    return make_settings(bot_email=None if mode == "same_account" else BOT_EMAIL)
 
 
 @pytest.fixture
