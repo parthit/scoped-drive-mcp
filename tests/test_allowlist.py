@@ -7,7 +7,7 @@ from scoped_drive_mcp.drive_client import FOLDER_MIME
 from scoped_drive_mcp.grants import GrantError, GrantService
 from scoped_drive_mcp.scope import ForbiddenError, InvalidInputError, OutOfScopeError, ScopeGuard
 from scoped_drive_mcp.service import DriveService
-from scoped_drive_mcp.store import Allowlist, MemoryStore, PrefixedStore
+from scoped_drive_mcp.store import AllowEntry, Allowlist, MemoryStore, PrefixedStore
 from tests.conftest import BOT_EMAIL, OWNER_EMAIL, ROOT, FakeClock, make_settings
 
 
@@ -228,6 +228,14 @@ def test_search_allowlisted_folders_and_files(grants, p2_service, bot) -> None:
     bot.ignore_parent_filter = True
     ids = {f["id"] for f in p2_service.search_files("secret", 50)["files"]}
     assert ids == {"proj-deep-doc"}
+
+
+def test_share_all_refreshes_the_scope_cache(world, allowlist, grants, p2_service) -> None:
+    allowlist.add(AllowEntry("proj", "Projects", FOLDER_MIME, None))
+    assert p2_service.search_files("roadmap", 10)["count"] == 0
+    assert grants.share_all()["shared"] == ["proj"]
+    assert [p["emailAddress"] for p in world.files["proj"].permissions] == [BOT_EMAIL]
+    assert p2_service.search_files("roadmap", 10)["count"] == 1
 
 
 def test_search_after_revoke(grants, p2_service) -> None:

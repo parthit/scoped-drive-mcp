@@ -1,8 +1,10 @@
 import pytest
 
+from scoped_drive_mcp.drive_client import FOLDER_MIME, DriveNotFoundError
 from scoped_drive_mcp.scope import (
     ForbiddenError,
     InvalidInputError,
+    OutOfScopeError,
     ScopeGuard,
     escape_query_value,
 )
@@ -176,3 +178,81 @@ def test_injection_attempts_stay_literal(drive, guard: ScopeGuard, payload: str)
 def test_search_control_chars_are_stripped(drive, guard: ScopeGuard) -> None:
     guard.search("plan\nnotes", 5, fields="id")
     assert "\n" not in drive.queries[-1]
+
+
+def test_folder_cap_stops_later_groups_on_the_same_level(drive, clock) -> None:
+    """Once max_folders is hit, sibling parent groups at that depth are not listed."""
+    drive.add("cap-a", "A", FOLDER_MIME, [ROOT])
+    drive.add("cap-b", "B", FOLDER_MIME, [ROOT])
+    for i in range(6):
+        drive.add(f"cap-a-{i}", f"a{i}", FOLDER_MIME, ["cap-a"])
+        drive.add(f"cap-b-{i}", f"b{i}", FOLDER_MIME, ["cap-b"])
+    guard = ScopeGuard(drive, ROOT, ttl=60, clock=clock, parents_chunk_size=1, max_folders=6)
+    assert len(guard.folders_in_scope()) == 6
+    assert len(drive.queries) == 3
+    assert any("'cap-a' in parents" in q for q in drive.queries)
+    assert all("'cap-b' in parents" not in q for q in drive.queries)
+
+
+def test_trashed_allowlisted_folder_drops_descendants(drive, clock) -> None:
+    drive.files[ROOT].trashed = True
+    guard = ScopeGuard(drive, ROOT, ttl=60, clock=clock)
+    assert not guard.is_in_scope(ROOT)
+    assert not guard.is_in_scope("sub-a")
+    assert not guard.is_in_scope("notes-txt")
+    assert guard.folders_in_scope() == ()
+    assert guard.search("plan", 50, fields="id") == []
+
+
+@pytest.mark.parametrize("alias", ["root", "appDataFolder"])
+def test_drive_aliases_are_rejected(guard: ScopeGuard, alias: str) -> None:
+    with pytest.raises(InvalidInputError):
+        guard.assert_in_scope(alias)
+
+
+def test_rewritten_drive_id_is_reported_canonically() -> None:
+    class RewriteDrive:
+        def get_file(self, file_id: str, fields: str) -> dict:
+            if file_id == "alias-token":
+                return {
+                    "id": "canonical-file",
+                    "parents": [],
+                    "trashed": False,
+                    "mimeType": "text/plain",
+                }
+            raise DriveNotFoundError(file_id)
+
+    guard = ScopeGuard(RewriteDrive(), None)  # type: ignore[arg-type]
+    with pytest.raises(OutOfScopeError) as exc:
+        guard.assert_in_scope("alias-token")
+    assert exc.value.file_id == "canonical-file"
+
+
+def test_individual_search_page_is_not_shrunk_to_max_results(drive, clock) -> None:
+    for i in range(12):
+        drive.add(f"decoy-{i:02d}", f"zzzz {i}", "text/plain", [ROOT], b"zzzz decoy")
+    drive.add("granted-zzzz", "zzzz target", "text/plain", [ROOT], b"zzzz target")
+    guard = ScopeGuard(
+        drive,
+        None,
+        ttl=60,
+        clock=clock,
+        allowlist=lambda: {"granted-zzzz": "text/plain"},
+    )
+    ids = {f["id"] for f in guard.search("zzzz", 1, fields="id,name")}
+    assert ids == {"granted-zzzz"}
+
+
+def test_individual_search_runs_above_the_old_file_cap(drive, clock) -> None:
+    drive.add("solo", "unique-needle", "text/plain", [ROOT], b"unique-needle")
+    drive.add("other-file", "other-needle", "text/plain", [ROOT], b"other-needle")
+    guard = ScopeGuard(
+        drive,
+        None,
+        ttl=60,
+        clock=clock,
+        allowlist=lambda: {"solo": "text/plain", "other-file": "text/plain"},
+        max_individual_files=1,
+    )
+    ids = {f["id"] for f in guard.search("unique-needle", 10, fields="id,name")}
+    assert ids == {"solo"}

@@ -585,7 +585,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         if failed:
             names = ", ".join(f["name"] or f["id"] for f in failed[:5])
             flash(request, "error", f"Could not share {len(failed)} item(s) with the bot: {names}.")
-        flash(request, "ok", f"Shared {len(shared)} item(s) with {settings.bot_email}.")
+        if shared or not failed:
+            flash(request, "ok", f"Shared {len(shared)} item(s) with {settings.bot_email}.")
         return RedirectResponse("/access", status_code=303)
 
     async def requests_page(request: Request) -> Response:

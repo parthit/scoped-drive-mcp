@@ -142,6 +142,10 @@ class GrantService:
                 replace(current, permission_id=permission_id, shared_with=self.bot_email)
             )
             shared.append(entry.id)
+        if shared:
+            # Newly shared folders become visible to the bot. Drop the cached folder
+            # tree the same way grant() does, or search keeps using the old set until TTL.
+            self._on_change()
         audit_owner("share_all", shared=str(len(shared)), failed=str(len(failed)))
         return {"shared": shared, "failed": failed}
 
@@ -175,15 +179,20 @@ class GrantService:
         meta = self.owner_meta(req.file_id)
         if meta is None:
             return []
-        options = [
-            ApprovalOption(
-                id=str(meta["id"]),
-                name=str(meta.get("name", "")),
-                mime_type=str(meta.get("mimeType", "")),
-                label="Share just this item",
-            )
-        ]
         root_id = self.my_drive_root_id()
+        item_id = str(meta["id"])
+        options: list[ApprovalOption] = []
+        # The item itself is not an option when it is My Drive. Sharing it would
+        # give the bot the owner's whole drive; grant() refuses that too.
+        if item_id != root_id:
+            options.append(
+                ApprovalOption(
+                    id=item_id,
+                    name=str(meta.get("name", "")),
+                    mime_type=str(meta.get("mimeType", "")),
+                    label="Share just this item",
+                )
+            )
         for parent_id in meta.get("parents") or []:
             if parent_id == root_id:
                 continue
@@ -213,7 +222,10 @@ class GrantService:
         validate_drive_id(target_id)
         if req.file_id:
             allowed = {o.id for o in self.approval_options(req)}
-            if target_id not in allowed:
+            # No safe option (item missing, or it is My Drive itself): the approval page
+            # sends the owner to Browse to pick a substitute. A visible file or its
+            # parent is still the only thing that may be approved for that request.
+            if allowed and target_id not in allowed:
                 raise GrantError("Pick the requested item or its parent folder.")
         entry = self.grant(target_id, request_id=req.id)
         self.requests.decide(req, APPROVED, granted_id=entry.id, granted_name=entry.name)
