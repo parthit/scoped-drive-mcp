@@ -203,11 +203,31 @@ flowchart LR
 ### Settings
 
 Required (reported by `/health` when missing): `API_TOKENS` (hard requirement), `GOOGLE_OAUTH_CLIENT_ID`,
-`GOOGLE_OAUTH_CLIENT_SECRET`, `OWNER_EMAIL`, `BOT_EMAIL`, `APP_BASE_URL`, `SESSION_SECRET`, `ENCRYPTION_KEY`,
+`GOOGLE_OAUTH_CLIENT_SECRET`, `OWNER_EMAIL`, `APP_BASE_URL`, `SESSION_SECRET`, `ENCRYPTION_KEY`,
 `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` (or `KV_REST_API_URL`/`KV_REST_API_TOKEN`).
-Optional: `GOOGLE_OAUTH_REFRESH_TOKEN`, `ROOT_FOLDER_ID`, `AUTH_MODE`, `MAX_BYTES`, `MAX_CHARS`,
-`SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL`. Without Redis an in-memory store is used (local development only).
-`/health` reports missing names, `store`, `owner_connected`, `bot_connected` and `bot_source`, never values.
+Optional: `BOT_EMAIL` (recommended, see below), `GOOGLE_OAUTH_REFRESH_TOKEN`, `ROOT_FOLDER_ID`, `AUTH_MODE`,
+`MAX_BYTES`, `MAX_CHARS`, `SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL`. Without Redis an in-memory store is used for
+local development and tests; when `VERCEL` is set and Redis is missing, the app serves only `/health` (503,
+`store_error: redis_not_configured`) and setup errors for `/mcp` and the dashboard.
+`/health` reports `mode`, missing names, `store`, `owner_connected`, `bot_connected` and `bot_source`, never values.
+
+### Follow-ups (same PR)
+
+- **Same-account mode:** if `BOT_EMAIL` is unset or equals `OWNER_EMAIL` (case-insensitive), the tools use the
+  owner's stored refresh token (`GOOGLE_OAUTH_REFRESH_TOKEN` still wins), grant/revoke/approve only change the
+  allowlist (no permission calls), `/connect-bot` is not needed and refuses bot flows. The allowlist and scope
+  guard are the only boundary. The overview, access and bot pages show a warning recommending a separate bot.
+  The owner's My Drive root can't be granted in either mode.
+- **Switching to a bot:** allowlist entries record `shared_with` (the bot address their `permission_id` belongs
+  to). `POST /access/share-bot` (CSRF, bot connected) runs `permissions.create` for every entry not yet shared
+  with the current bot, stores the new ids, removes a share left for an earlier bot address (best effort), and
+  reports failures; running it again does nothing.
+- **Parents in tool output** are filtered to ids that are allowlisted or inside an allowlisted item
+  (`ScopeGuard.parent_in_scope`, memoised per call); the key is dropped when nothing remains.
+- **`GET`/`DELETE /mcp`** return 405 with `Allow: POST` before a session manager is created (a GET with
+  `Accept: text/event-stream` used to hang until the platform timeout).
+- **Tests** generate keys and tokens at runtime; the phase-1 scope/service/policy/app suites run in both modes
+  (owner view; bot view that only sees what is shared with it).
 
 ### Phase-1 risks re-checked
 

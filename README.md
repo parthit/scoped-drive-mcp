@@ -20,6 +20,9 @@ Access is limited twice:
 2. **By this server:** every call checks the token's role and confirms the file is on the allowlist, or inside
    an allowlisted folder, before anything is sent to Google.
 
+The first wall needs a second Google account. You can skip it (see [Two modes](#two-modes-separate-bot-or-same-account)),
+but a separate bot is recommended.
+
 New here? Follow the [Phase 2 setup and test walkthrough](#phase-2-setup-and-test-walkthrough). The older
 single-folder setup (phase 1) still works and is described further down. See [docs/PLAN.md](docs/PLAN.md) for
 the design notes.
@@ -58,12 +61,35 @@ Grok shows you the link; after you approve, it retries (or calls `check_access_r
 `read_file` exports Google Docs and Slides as plain text and Google Sheets as CSV (first sheet only), downloads
 text-like files, and refuses binary files (PDFs, images, ...). Output is capped by `MAX_BYTES` and `MAX_CHARS`.
 
+## Two modes: separate bot or same account
+
+| | **Separate bot** (recommended) | **Same account** |
+| --- | --- | --- |
+| How to choose | set `BOT_EMAIL` to a second Gmail account | leave `BOT_EMAIL` empty, or set it to `OWNER_EMAIL` |
+| Grok's tools act as | the bot account | **you** (your stored dashboard sign-in) |
+| Ticking an item | shares it with the bot in Drive **and** adds it to the allowlist | only adds it to the allowlist |
+| What stops Grok reaching the rest of your Drive | Google (the bot can't see it) **and** this server | **only this server's allowlist check** |
+| `/connect-bot` | required once | not needed |
+
+Same-account mode is quicker to set up: no second account, no bot sign-in. The trade-off is that there is only
+one wall. The server still refuses anything that isn't ticked or inside a ticked folder (every tool, search and
+write is checked the same way, and the test suite runs the whole scope check in both modes). But the Google
+credentials it holds can read and edit your **whole** Drive, so a bug in this server, or a leaked
+`ENCRYPTION_KEY` plus Redis token, would expose everything rather than just what you ticked. The dashboard and
+`/health` show which mode is active, and the dashboard shows a warning in same-account mode.
+
+**Switching to a bot later:** create the bot account, set `BOT_EMAIL` to it, redeploy, connect it under **Bot**,
+then go to **Access** and click **Share all allowed items with the bot**. That shares every item you ticked so
+far with the bot (no emails are sent). It is safe to click again: items already shared with this bot are
+skipped, and anything that fails is listed and can be retried.
+
 ---
 
 ## Phase 2 setup and test walkthrough
 
 This is the whole setup, written for someone who hasn't done it before. You'll need: your normal Google account
-(the **owner**), a second Gmail account to act as the **bot**, a GitHub account with this repo, and a Vercel
+(the **owner**), a second Gmail account to act as the **bot** (skip it for
+[same-account mode](#two-modes-separate-bot-or-same-account)), a GitHub account with this repo, and a Vercel
 account. Allow about 30 minutes. Optional for step 6: [uv](https://docs.astral.sh/uv/) on your computer.
 
 ### 1. Google Cloud: one OAuth client for the dashboard
@@ -76,7 +102,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
    consoles):
    - App name (e.g. `Grok Drive`), and your email as support and developer contact.
    - **Audience / User type:** **External**.
-   - **Test users:** add **both** your own address and the bot's address.
+   - **Test users:** add **both** your own address and the bot's address (just yours in same-account mode).
 4. **Create the client:** **APIs & Services → Credentials → Create credentials → OAuth client ID** (or
    **Clients → Create client**). Application type: **Web application**. Under **Authorized redirect URIs** add:
    - `https://<project>.vercel.app/auth/callback` (use your real Vercel domain, see step 2)
@@ -110,11 +136,11 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `GOOGLE_OAUTH_CLIENT_ID` | yes | step 1.4 |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | step 1.4 |
 | `OWNER_EMAIL` | yes | your own Google address (the only account that can sign in) |
-| `BOT_EMAIL` | yes | the bot Gmail address |
+| `BOT_EMAIL` | recommended | the bot Gmail address; leave empty for [same-account mode](#two-modes-separate-bot-or-same-account) |
 | `APP_BASE_URL` | yes | your Vercel domain, e.g. `https://scoped-drive-mcp.vercel.app` (no trailing `/`) |
 | `SESSION_SECRET` | yes | step 2.3 |
 | `ENCRYPTION_KEY` | yes | step 2.3 |
-| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | yes | added by the Upstash integration (or `KV_REST_API_URL` / `KV_REST_API_TOKEN`) |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | yes | added by the Upstash integration (or `KV_REST_API_URL` / `KV_REST_API_TOKEN`); on Vercel the app refuses to start without them |
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | no | only for the phase-1 script route; if set it overrides `/connect-bot` |
 | `ROOT_FOLDER_ID` | no | a folder that is always allowed in addition to your ticks |
 | `MAX_BYTES`, `MAX_CHARS`, `SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL` | no | limits; defaults 5 MB, 100000, 60 s, 2 s |
@@ -127,8 +153,11 @@ It never shows values, only names:
 
 - `"status": "ok"` with `"missing": []` means every required setting is present.
 - `"status": "incomplete"` lists the `missing` names. `owner_connected` and `bot_connected` tell you whether
-  steps 4 are done.
+  steps 4 are done. `"mode"` is `separate_bot` or `same_account`.
 - HTTP 503 `"misconfigured"` means a value is malformed (e.g. a bad `ENCRYPTION_KEY`); `problems` names it.
+- HTTP 503 `"misconfigured"` with `"store_error": "redis_not_configured"` means the Redis variables are missing.
+  On Vercel the server then refuses to serve the dashboard and the tools (each instance has its own memory, so
+  grants and sign-ins would silently disappear). Connect Upstash (step 2.2) and redeploy.
 
 Preview deployments are usually behind Vercel's login, so use the production URL for everything below.
 
@@ -140,6 +169,9 @@ Preview deployments are usually behind Vercel's login, so use the production URL
    another account" if needed) and allow Drive access. If you pick any account other than `BOT_EMAIL`, it is
    rejected and nothing is stored. The overview should now show both accounts as connected.
 
+In same-account mode skip step 2: Grok's tools use your own sign-in from step 1, and the **Bot** page just
+explains the mode.
+
 Both sign-ins are stored in Redis, encrypted with `ENCRYPTION_KEY`. (Prefer the old way? Running
 `scripts/bootstrap_oauth.py` and setting `GOOGLE_OAUTH_REFRESH_TOKEN` still works; it needs a Desktop client.)
 
@@ -148,7 +180,8 @@ Both sign-ins are stored in Redis, encrypted with `ENCRYPTION_KEY`. (Prefer the 
 1. In your own Google Drive, make a folder `Grok test` with a Google Doc inside (e.g. "Test plan" with a sentence
    in it). Put a second doc **outside** it, e.g. "Private note" in My Drive.
 2. In the dashboard, click **Browse**, find `Grok test` and click **Grant**. It now shows **shared**, and
-   **Access** lists it. (Behind the scenes the folder is shared with the bot as Editor, without an email.)
+   **Access** lists it. (Behind the scenes the folder is shared with the bot as Editor, without an email. In
+   same-account mode nothing changes in Drive; it is only added to the allowlist.)
 
 ### 6. Create an API token and connect Grok
 
@@ -189,6 +222,8 @@ Also disconnect Grok's built-in Google Drive connector so it can't bypass this s
 4. **Retry:** ask Grok again. It works now.
 5. **Revoke:** in **Access**, click **Revoke** next to `Private note`. Ask again: Grok gets a new approval link
    instead of the content (the server stops within ~2 seconds, and the bot's sharing is removed in Drive).
+   `get_metadata` and `list_folder` only ever list parent folder ids that are themselves shared, so the ids of
+   your other folders never reach Grok.
 6. **Activity** shows every call, grant, revoke and decision (no file contents).
 
 Grok can also ask for something it can't find with `request_access`; the approval page then lets you browse
@@ -396,7 +431,7 @@ authentication/headers section). Click **Connect**, then **List Tools**. Try:
 ```bash
 cp .env.example .env        # fill in values; .env is git-ignored
 # for the dashboard locally: APP_BASE_URL=http://localhost:8000 (and that redirect URI in Google Cloud);
-# without the Redis variables an in-memory store is used (lost on restart)
+# without the Redis variables an in-memory store is used (lost on restart; refused on Vercel)
 uv run --env-file .env uvicorn api.index:app --reload
 curl http://127.0.0.1:8000/health
 open http://localhost:8000/   # the dashboard
@@ -416,8 +451,9 @@ After changing dependencies, regenerate Vercel's requirements file:
 
 ## (i) Security notes
 
-- **Two layers.** Ticking shares the item with the bot (Google enforces that) *and* adds it to the server's
-  allowlist. A file the bot can see but that isn't allowlisted (e.g. something a stranger shared with the bot's
+- **Two layers** (separate-bot mode). Ticking shares the item with the bot (Google enforces that) *and* adds it
+  to the server's allowlist. In same-account mode only the allowlist applies; see
+  [Two modes](#two-modes-separate-bot-or-same-account). A file the bot can see but that isn't allowlisted (e.g. something a stranger shared with the bot's
   Gmail, or a file the bot created in a folder you later revoked) is still refused, and an allowlisted item the
   bot can't see (sharing removed in Drive) is refused too.
 - **Revoking** removes the allowlist entry first (every server instance re-reads the allowlist at least every
@@ -428,7 +464,12 @@ After changing dependencies, regenerate Vercel's requirements file:
   and the dashboard cookie doesn't work on `/mcp`.
 - **Stored secrets:** the owner's and bot's refresh tokens are encrypted with `ENCRYPTION_KEY` (Fernet) before
   they go into Redis. Anyone with `ENCRYPTION_KEY` *and* Redis access could use them, so keep both private.
-  The owner token has full Drive scope because sharing needs it; it's only used by the dashboard.
+  The owner token has full Drive scope because sharing needs it. In separate-bot mode it's only used by the
+  dashboard; in same-account mode the tools use it too, which is why that mode relies on the allowlist alone.
+- **Parent ids:** tool results only list parent folders that are themselves shared (or inside something shared),
+  so Grok never learns the ids of your other folders.
+- **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a
+  session) answer `405` with `Allow: POST` instead of holding the connection open.
 - **Access requests** have 192-bit random IDs, expire after 7 days, and only the owner can open them. A pending
   request for the same file is reused rather than duplicated.
 - **Sharing is inherited.** Anything placed inside a shared folder, by you or anyone else with access, becomes
