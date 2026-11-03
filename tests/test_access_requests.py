@@ -6,7 +6,7 @@ import re
 import pytest
 
 from scoped_drive_mcp.access import REQUEST_TTL, AccessRequests
-from scoped_drive_mcp.store import MemoryStore, PrefixedStore
+from scoped_drive_mcp.store import AllowEntry, MemoryStore, PrefixedStore
 from tests.conftest import BASE_URL, BOT_EMAIL, FakeClock
 from tests.dash import client, login, mcp_call, post
 
@@ -133,6 +133,50 @@ def test_approve_rejects_other_targets(c, world, p2_app) -> None:
     assert world.files["proj"].permissions == []
     assert requests_of(p2_app).get(payload["request_id"]).status == "pending"
     assert "Pick the requested item" in c.get(path).text
+
+
+def test_drive_alias_does_not_open_an_access_request(c, p2_app) -> None:
+    for file_id in ("root", "appDataFolder"):
+        result = mcp_call(c, "read_file", file_id=file_id)
+        assert result["isError"] and "Invalid input" in result["content"][0]["text"]
+    assert requests_of(p2_app).recent() == []
+
+
+def test_substitute_item_when_the_requested_file_is_not_in_the_owners_drive(c, world) -> None:
+    payload = mcp_call(c, "get_metadata", file_id="stray-shared")["structuredContent"]
+    path = payload["approval_url"].removeprefix(BASE_URL)
+    page = c.get(path).text
+    assert "pick a different item" in page and "Share just this item" not in page
+    post(c, f"{path}/approve", target_id="loose-two")
+    assert [p["emailAddress"] for p in world.files["loose-two"].permissions] == [BOT_EMAIL]
+    status = mcp_call(c, "check_access_request", request_id=payload["request_id"])
+    assert status["structuredContent"]["granted_id"] == "loose-two"
+
+
+def test_my_drive_root_itself_cannot_be_approved(c, world, p2_app) -> None:
+    payload = mcp_call(c, "read_file", file_id="owner-root")["structuredContent"]
+    path = payload["approval_url"].removeprefix(BASE_URL)
+    page = c.get(path).text
+    assert "Share just this item" not in page and "pick a different item" in page
+    assert "whole My Drive can't be shared" in page
+    assert "isn't in your Drive" not in page
+    post(c, f"{path}/approve", target_id="owner-root")
+    assert p2_app.state.dashboard.allowlist.entries() == {}
+    assert requests_of(p2_app).get(payload["request_id"]).status == "pending"
+    assert "whole My Drive" in c.get(path).text
+    post(c, f"{path}/approve", target_id="proj")
+    assert [p["emailAddress"] for p in world.files["proj"].permissions] == [BOT_EMAIL]
+
+
+def test_share_all_failure_does_not_flash_success(c, p2_app) -> None:
+    p2_app.state.dashboard.allowlist.add(
+        AllowEntry("stray-shared", "eve secret", "text/plain", None)
+    )
+    assert post(c, "/access/share-bot").status_code == 303
+    page = c.get("/access").text
+    assert "Could not share 1 item" in page
+    assert "Shared 0 item" not in page
+    assert 'class="flash ok"' not in page
 
 
 def test_my_drive_root_is_not_offered(c) -> None:

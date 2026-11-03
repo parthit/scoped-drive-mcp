@@ -15,6 +15,7 @@ Rules:
   cache entry expires. The allowlist is re-read every `allowlist_ttl` seconds
   (default 2), so a revoke takes effect within that time on every instance.
 - Trashed files and files Drive reports as missing are treated as out of scope.
+  An allowlisted folder that is itself trashed does not keep its descendants in scope.
 - The walk is breadth-first over all parents, tracks visited IDs (cycles) and is
   capped in depth and total lookups.
 - Allowlisted items are in scope for reads and (if folders) as parents for creates,
@@ -36,7 +37,12 @@ from typing import Any
 from .drive_client import FOLDER_MIME, DriveClient, DriveNotFoundError
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+# Drive resolves these to a different item for each caller. They must never be stored
+# on an access request: the owner would then be shown their own My Drive or app-data folder.
+_DRIVE_ALIASES = frozenset({"root", "appDataFolder"})
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_INDIVIDUAL_SEARCH_PAGE_SIZE = 100
+_INDIVIDUAL_SEARCH_MAX_PAGES = 10
 
 REF_FIELDS = "id,parents,trashed,mimeType"
 NOT_IN_SCOPE = "file not found or not shared with the assistant"
@@ -60,6 +66,11 @@ class InvalidInputError(ValueError):
 
 
 def validate_drive_id(value: Any, what: str = "file_id") -> str:
+    if isinstance(value, str) and value in _DRIVE_ALIASES:
+        raise InvalidInputError(
+            f"{what} must be a canonical Drive file id, not an alias such as 'root' "
+            "or 'appDataFolder'"
+        )
     if not isinstance(value, str) or not _ID_RE.fullmatch(value):
         raise InvalidInputError(f"{what} must be a Google Drive ID (letters, digits, - and _)")
     return value
@@ -220,11 +231,13 @@ class ScopeGuard:
                 return False
             next_frontier: list[str] = []
             for parent_id in frontier:
-                if parent_id in allowed:
-                    return True
                 if parent_id in visited:
                     continue
                 visited.add(parent_id)
+                if parent_id in allowed:
+                    if not self._allowlisted_anchor_unusable(parent_id):
+                        return True
+                    continue
                 lookups += 1
                 if lookups > self.max_lookups:
                     return False
@@ -235,12 +248,26 @@ class ScopeGuard:
             frontier = next_frontier
         return False
 
+    def _allowlisted_anchor_unusable(self, file_id: str) -> bool:
+        """Whether an allowlisted ancestor must not grant scope.
+
+        A trashed allowlisted folder (or an id Drive rewrites to something else) does not
+        cover descendants. If the bot cannot see the folder at all, the allowlisted id
+        still counts: the owner chose it, and a missing lookup is not evidence it is trashed.
+        """
+        ref = self._ancestor(file_id)
+        if ref is None:
+            return False
+        return ref.trashed or ref.id != file_id
+
     def parent_in_scope(self, parent_id: str) -> bool:
         """Whether a folder id may be shown to the assistant (it is allowed or inside an
         allowed item). Ids outside the scope would leak the owner's folder structure."""
         allowed = self.allowed()
         if parent_id in allowed:
-            return True
+            # Same rule as the scope walk: a trashed allowlisted folder, or an id Drive
+            # rewrites to a different item, must not be shown as an in-scope parent.
+            return not self._allowlisted_anchor_unusable(parent_id)
         ref = self._ancestor(parent_id)
         if ref is None or ref.trashed or ref.id != parent_id:
             return False
@@ -257,7 +284,10 @@ class ScopeGuard:
         if ref is None:
             ref = self.resolve(file_id)
         if ref.id != file_id or ref.trashed:
-            raise OutOfScopeError(file_id)
+            # Drive aliases such as "root" resolve to a different item for the bot than
+            # for the owner. Report the canonical id so an access request is not filed
+            # under the alias (which the owner would load as their own My Drive).
+            raise OutOfScopeError(ref.id if ref.id != file_id else file_id)
         allowed = self.allowed()
         if ref.id in allowed:
             if not allow_root:
@@ -294,18 +324,32 @@ class ScopeGuard:
             if self._folders is not None and self._folders[0] > now and self._folders[1] == key:
                 return self._folders[2]
 
-        seen: dict[str, None] = dict.fromkeys(roots)
-        level = list(roots)
+        live_roots: list[str] = []
+        for fid in roots:
+            if len(live_roots) >= self.max_folders:
+                break
+            ref = self._ancestor(fid)
+            # A trashed allowlisted folder is not a search root. An id the bot cannot
+            # see is kept: we cannot tell whether it is trashed.
+            if ref is not None and (ref.trashed or ref.id != fid or not ref.is_folder):
+                continue
+            live_roots.append(fid)
+        seen: dict[str, None] = dict.fromkeys(live_roots)
+        level = list(live_roots)
         while level and len(seen) < self.max_folders:
             next_level: list[str] = []
             for group in chunked(level, self.parents_chunk_size):
+                if len(seen) >= self.max_folders:
+                    break
                 q = f"mimeType='{FOLDER_MIME}' and trashed=false and ({parents_clause(group)})"
                 page_token: str | None = None
-                while True:
+                while len(seen) < self.max_folders:
                     resp = self.drive.list_files(
                         q, fields=REF_FIELDS, page_size=1000, page_token=page_token
                     )
                     for item in resp.get("files", []):
+                        if len(seen) >= self.max_folders:
+                            break
                         ref = FileRef.from_api(item)
                         if ref.id in seen or not ref.is_folder or ref.trashed:
                             continue
@@ -350,13 +394,20 @@ class ScopeGuard:
         results: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        def collect(q: str, accept: Callable[[FileRef], bool], max_pages: int) -> None:
+        def collect(
+            q: str,
+            accept: Callable[[FileRef], bool],
+            max_pages: int,
+            *,
+            page_size: int | None = None,
+        ) -> None:
+            size = min(100, max_results) if page_size is None else page_size
             page_token: str | None = None
             pages = 0
             while len(results) < max_results and pages < max_pages:
                 pages += 1
                 resp = self.drive.list_files(
-                    q, fields=all_fields, page_size=min(100, max_results), page_token=page_token
+                    q, fields=all_fields, page_size=size, page_token=page_token
                 )
                 for item in resp.get("files", []):
                     if "id" not in item:
@@ -380,6 +431,15 @@ class ScopeGuard:
                 return results
 
         individual = self.individual_files()
-        if individual and len(individual) <= self.max_individual_files:
-            collect(self.individual_query(text), lambda ref: ref.id in individual, max_pages=5)
+        if individual:
+            # Parent-scoped queries can use a small page, because those hits are in
+            # scope. This query is not: most hits are unrelated Drive files, so a small
+            # max_results must not shrink the page, and a large allowlist must not skip
+            # the scan (that used to drop every directly granted file).
+            collect(
+                self.individual_query(text),
+                lambda ref: ref.id in individual,
+                max_pages=_INDIVIDUAL_SEARCH_MAX_PAGES,
+                page_size=_INDIVIDUAL_SEARCH_PAGE_SIZE,
+            )
         return results
