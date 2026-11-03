@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Access request{% endblock %}
+{% block content %}
+<h1>Access request</h1>
+<div class="card">
+  <table style="border:none">
+    <tr><th style="width:180px">Status</th><td><span class="pill {{ 'pending' if req.status == 'pending' else ('ok' if req.status == 'approved' else 'bad') }}">{{ req.status }}</span></td></tr>
+    {% if req.file_id %}
+    <tr><th>Item</th><td>
+      {% if owner_meta %}{{ owner_meta.name }} <span class="muted">({{ describe_mime(owner_meta.mimeType) }})</span>
+        {% if owner_meta.webViewLink %} · <a href="{{ owner_meta.webViewLink }}" target="_blank" rel="noopener noreferrer">open in Drive</a>{% endif %}
+      {% elif req.file_name %}{{ req.file_name }}
+      {% else %}<span class="muted">not found in your Drive</span>{% endif %}
+      <br><code>{{ req.file_id }}</code></td></tr>
+    {% endif %}
+    {% if req.description %}<tr><th>What the assistant asked for</th><td>{{ req.description }}</td></tr>{% endif %}
+    <tr><th>Reason</th><td>{{ req.reason or "—" }}</td></tr>
+    <tr><th>Token</th><td>{{ req.token_name or "—" }}</td></tr>
+    <tr><th>Tool</th><td>{{ req.tool }}</td></tr>
+    <tr><th>Created</th><td>{{ req.created_at }}</td></tr>
+    {% if req.decided_at %}<tr><th>Decided</th><td>{{ req.decided_at }}</td></tr>{% endif %}
+    {% if req.granted_id %}<tr><th>Shared</th><td>{{ req.granted_name or req.granted_id }} <code>{{ req.granted_id }}</code></td></tr>{% endif %}
+  </table>
+</div>
+
+{% if req.status == "pending" %}
+<div class="card">
+  {% if req.file_id %}
+    {% if options %}
+    <form method="post" action="/requests/{{ req.id }}/approve">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% for o in options %}
+      <p><label><input type="radio" name="target_id" value="{{ o.id }}" {{ "checked" if loop.first }}>
+        {{ o.label }}: <b>{{ o.name }}</b> <span class="muted">({{ describe_mime(o.mime_type) }})</span></label></p>
+      {% endfor %}
+      <button class="primary" type="submit">Approve</button>
+    </form>
+    {% else %}
+    <p class="muted">This item isn't in your Drive (or you can't see it), so it can't be shared from here.
+      You can deny the request, or <a href="/browse?request={{ req.id }}">pick a different item</a>.</p>
+    {% endif %}
+  {% else %}
+    <p>Find the item the assistant asked for and share it:</p>
+    <p><a class="btn primary" href="/browse?request={{ req.id }}">Pick an item in your Drive</a></p>
+  {% endif %}
+  <form method="post" action="/requests/{{ req.id }}/deny" style="margin-top:14px">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="danger" type="submit">Deny</button>
+  </form>
+</div>
+{% endif %}
+<p><a href="/requests">All requests</a></p>
+{% endblock %}

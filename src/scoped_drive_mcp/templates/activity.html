@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Activity{% endblock %}
+{% block content %}
+<h1>Recent activity</h1>
+<p class="muted">The last 500 audit events (newest first). Contents, names and search text are never logged.</p>
+<table>
+  <thead><tr><th>Time (UTC)</th><th>Who</th><th>What</th><th>Item</th><th>Decision</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for r in records %}
+  <tr>
+    <td class="muted">{{ r.ts }}</td>
+    <td>{% if r.event == "owner" %}owner{% elif r.event == "auth" %}<span class="muted">unknown</span>{% else %}{{ r.token_name or "—" }}{% endif %}</td>
+    <td>{{ r.tool or r.action or r.path or r.event }}</td>
+    <td><code>{{ r.file_id or r.folder_id or r.parent_id or r.request_id or "" }}</code></td>
+    <td><span class="pill {{ 'ok' if r.decision == 'allow' else 'bad' }}">{{ r.decision }}</span></td>
+    <td class="muted">{{ r.reason or "" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">No activity yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

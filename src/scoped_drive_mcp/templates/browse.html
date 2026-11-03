@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Browse{% endblock %}
+{% macro keep(extra) -%}{% if picking %}&request={{ picking.id | urlencode }}{% endif %}{{ extra }}{%- endmacro %}
+{% block content %}
+<h1>Browse My Drive</h1>
+{% if picking %}
+<div class="warn">Picking an item for the request:
+  <b>{{ picking.description or picking.file_id }}</b>
+  {% if picking.reason %}<span class="muted">({{ picking.reason }})</span>{% endif %}.
+  Click <b>Share for this request</b> next to the right item. <a href="/requests/{{ picking.id }}">Back to the request</a></div>
+{% endif %}
+<form method="get" action="/browse" style="margin-bottom:14px">
+  {% if picking %}<input type="hidden" name="request" value="{{ picking.id }}">{% endif %}
+  <input type="search" name="q" value="{{ q or '' }}" placeholder="Search names in your Drive">
+  <button type="submit">Search</button>
+  {% if q %}<a href="/browse?folder=root{{ keep('') }}">Clear</a>{% endif %}
+</form>
+
+{% if not q %}
+<p class="crumbs">
+  {% for c in crumbs %}
+    {% if not loop.last %}<a href="/browse?folder={{ c.id | urlencode }}{{ keep('') }}">{{ c.name }}</a><span class="sep">/</span>
+    {% else %}<b>{{ c.name }}</b>{% endif %}
+  {% endfor %}
+  {% if current and not is_root %}
+    &nbsp;
+    {% if current_granted %}
+      <span class="pill ok">shared</span>
+    {% elif covered_by %}
+      <span class="pill ok">shared through {{ covered_by }}</span>
+    {% endif %}
+  {% endif %}
+</p>
+{% if covered_by %}<p class="muted">Everything in this folder is available to the assistant because “{{ covered_by }}” is shared.</p>{% endif %}
+{% else %}
+<p class="muted">Search results for “{{ q }}”.</p>
+{% endif %}
+
+<table>
+  <thead><tr><th>Name</th><th>Type</th><th>Assistant access</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td>
+      <span class="icon">{% if r.is_folder %}📁{% elif r.is_shortcut %}↪{% else %}📄{% endif %}</span>
+      {% if r.is_folder %}<a href="/browse?folder={{ r.id | urlencode }}{{ keep('') }}">{{ r.name }}</a>
+      {% elif r.link %}<a href="{{ r.link }}" target="_blank" rel="noopener noreferrer">{{ r.name }}</a>
+      {% else %}{{ r.name }}{% endif %}
+    </td>
+    <td class="muted">{{ r.kind }}</td>
+    <td>
+      {% if r.granted %}<span class="pill ok">shared</span>
+      {% elif r.covered %}<span class="pill ok">via folder</span>
+      {% else %}<span class="pill">not shared</span>{% endif %}
+    </td>
+    <td style="text-align:right">
+      {% if picking %}
+        <form class="inline" method="post" action="/requests/{{ picking.id }}/approve">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="target_id" value="{{ r.id }}">
+          <button class="primary" type="submit">Share for this request</button>
+        </form>
+      {% elif r.granted %}
+        <form class="inline" method="post" action="/revoke">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="file_id" value="{{ r.id }}">
+          <input type="hidden" name="next" value="{{ here }}">
+          <button class="danger" type="submit">Revoke</button>
+        </form>
+      {% else %}
+        <form class="inline" method="post" action="/grant">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="file_id" value="{{ r.id }}">
+          <input type="hidden" name="next" value="{{ here }}">
+          <button type="submit" title="{{ 'Shares the shortcut target' if r.is_shortcut else 'Share with the assistant' }}">{{ "Grant target" if r.is_shortcut else "Grant" }}</button>
+        </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">Nothing here.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if next_token %}
+<p><a href="/browse?folder={{ folder | urlencode }}&page={{ next_token | urlencode }}{{ keep('') }}">Next page →</a></p>
+{% endif %}
+{% endblock %}

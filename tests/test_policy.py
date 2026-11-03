@@ -26,15 +26,22 @@ VALID_ARGS = {
     "update_file_content": {"file_id": "notes-txt", "content": "replaced"},
     "rename_file": {"file_id": "notes-txt", "new_name": "renamed.txt"},
     "trash_file": {"file_id": "notes-txt"},
+    "request_access": {"description": "the budget sheet", "reason": "to answer a question"},
+    "check_access_request": {"request_id": "A" * 32},
 }
 
+VIEWER_EXPECTED = {
+    "search_files",
+    "list_folder",
+    "get_metadata",
+    "read_file",
+    "request_access",
+    "check_access_request",
+}
 EXPECTED = {
-    Role.VIEWER: {"search_files", "list_folder", "get_metadata", "read_file"},
-    Role.EDITOR: {
-        "search_files",
-        "list_folder",
-        "get_metadata",
-        "read_file",
+    Role.VIEWER: VIEWER_EXPECTED,
+    Role.EDITOR: VIEWER_EXPECTED
+    | {
         "create_folder",
         "create_doc",
         "upload_file",
@@ -74,8 +81,8 @@ async def test_registered_tools_are_exactly_the_role_map(service) -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize("role", list(Role))
 @pytest.mark.parametrize("tool", sorted(VALID_ARGS))
-async def test_role_matrix(service, capsys, role: Role, tool: str) -> None:
-    mcp = create_mcp(service)
+async def test_role_matrix(service, access, capsys, role: Role, tool: str) -> None:
+    mcp = create_mcp(service, access)
     token = current_principal.set(Principal(token_name=f"{role}-tok", role=role))
     try:
         if tool in EXPECTED[role]:
@@ -117,6 +124,7 @@ async def test_no_principal_is_denied(service) -> None:
 
 @pytest.mark.anyio
 async def test_scope_denial_is_audited(service, capsys) -> None:
+    # without an AccessService (no APP_BASE_URL) scope denials stay plain "Forbidden" errors
     mcp = create_mcp(service)
     token = current_principal.set(Principal(token_name="admin-tok", role=Role.ADMIN))
     try:

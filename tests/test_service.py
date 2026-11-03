@@ -60,8 +60,14 @@ def test_read_outside_forbidden(service: DriveService, file_id: str) -> None:
         service.get_metadata(file_id)
 
 
-def test_list_folder_defaults_to_root(service: DriveService) -> None:
+def test_list_folder_without_id_lists_allowed_items(service: DriveService) -> None:
     result = service.list_folder()
+    assert [f["id"] for f in result["files"]] == [ROOT]
+    assert result["folder"] is None
+
+
+def test_list_root_folder(service: DriveService) -> None:
+    result = service.list_folder(ROOT)
     ids = {f["id"] for f in result["files"]}
     assert ids == {"sub-a", "sheet-1", "image-png", "shortcut-1"}
     assert result["folder"]["id"] == ROOT
@@ -206,3 +212,41 @@ def test_writes_never_touch_parents(drive, service: DriveService) -> None:
 )
 def test_is_text_like(mime: str, name: str, expected: bool) -> None:
     assert is_text_like(mime, name) is expected
+
+
+# ---- parents are cut down to in-scope ids ---------------------------------------------
+
+
+def test_root_folder_parent_is_not_shown(service: DriveService) -> None:
+    meta = service.get_metadata(ROOT)
+    assert "parents" not in meta  # its parent is the owner's My Drive
+    assert service.list_folder(ROOT)["folder"].get("parents") is None
+    assert service.get_metadata("sub-a")["parents"] == [ROOT]
+
+
+def test_outside_parent_of_multi_parent_file_is_removed(service: DriveService) -> None:
+    assert service.get_metadata("multi-parent")["parents"] == ["sub-a"]
+    assert service.read_file("multi-parent")["file"]["parents"] == ["sub-a"]
+    listed = {f["id"]: f for f in service.list_folder("sub-a")["files"]}
+    assert listed["multi-parent"]["parents"] == ["sub-a"]
+    found = service.search_files("plan both")["files"]
+    assert [f["parents"] for f in found] == [["sub-a"]]
+
+
+def test_write_results_only_show_in_scope_parents(service: DriveService) -> None:
+    assert service.rename_file("multi-parent", "renamed.txt")["parents"] == ["sub-a"]
+    assert service.update_file_content("multi-parent", "x")["parents"] == ["sub-a"]
+    assert service.create_folder("new", parent_id="sub-a")["parents"] == ["sub-a"]
+    assert service.trash_file("multi-parent")["parents"] == ["sub-a"]
+
+
+def test_no_output_mentions_outside_ids(service: DriveService) -> None:
+    outputs = [
+        service.list_folder(ROOT),
+        service.list_folder("sub-a"),
+        service.get_metadata(ROOT),
+        service.search_files("plan"),
+        service.read_file("multi-parent"),
+    ]
+    text = str(outputs)
+    assert "outside-folder" not in text and "bot-my-drive-root" not in text
