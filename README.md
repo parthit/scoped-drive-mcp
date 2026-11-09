@@ -583,3 +583,7 @@ tests/                        pytest suite with a fake Drive (owner and bot view
   session manager (serverless runtimes may skip lifespan, or send the first request before startup finishes),
   `/mcp` starts a short-lived stateless session manager **inside each request**. This works the same under
   uvicorn, Vercel and test clients without lifespan.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, tests, and pull requests. This project is licensed under the [MIT License](LICENSE).
