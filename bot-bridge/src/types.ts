@@ -1,0 +1,102 @@
+export const LINK_STATUSES = ["awaiting_peer", "pending_approval", "active", "revoked"] as const;
+export type LinkStatus = (typeof LINK_STATUSES)[number];
+export type Side = "a" | "b";
+export const SCOPE = "messages_only" as const;
+export type Scope = typeof SCOPE;
+
+export type UserRow = {
+  user_id: string;
+  email: string | null;
+  created_at: Date;
+};
+
+export type BotRow = {
+  bot_id: string;
+  user_id: string;
+  display_name: string;
+  token_hash: string;
+  created_at: Date;
+};
+
+export type LinkRow = {
+  link_id: string;
+  bot_a: string;
+  bot_b: string | null;
+  scope: Scope;
+  status: LinkStatus;
+  invite_code: string;
+  approved_a_at: Date | null;
+  approved_b_at: Date | null;
+  revoked_at: Date | null;
+  revoked_by: string | null;
+  created_at: Date;
+};
+
+export type ApprovalRow = {
+  approval_id: string;
+  link_id: string;
+  user_id: string;
+  side: Side;
+  token: string;
+  expires_at: Date;
+  consumed_at: Date | null;
+};
+
+export type ManageRow = {
+  link_id: string;
+  bot_id: string;
+  token: string;
+  created_at: Date;
+};
+
+export type MessageRow = {
+  msg_id: string;
+  link_id: string;
+  from_bot: string;
+  to_bot: string;
+  body: string;
+  thread_id: string;
+  idempotency_key: string | null;
+  created_at: Date;
+  read_at: Date | null;
+  expires_at: Date;
+};
+
+export type AuditRow = {
+  event_id: string;
+  actor: string;
+  action: string;
+  link_id: string | null;
+  meta_json: Record<string, unknown>;
+  created_at: Date;
+};
+
+export type InboxFilter = {
+  toBot: string;
+  now: Date;
+  linkId?: string;
+  unreadOnly?: boolean;
+  since?: Date;
+  before?: { createdAt: Date; msgId: string };
+  limit: number;
+};
+
+export function deriveStatus(link: Pick<LinkRow, "revoked_at" | "bot_b" | "approved_a_at" | "approved_b_at">): LinkStatus {
+  if (link.revoked_at) return "revoked";
+  if (!link.bot_b) return "awaiting_peer";
+  if (link.approved_a_at && link.approved_b_at) return "active";
+  return "pending_approval";
+}
+
+export function sideOf(link: Pick<LinkRow, "bot_a" | "bot_b">, botId: string): Side | null {
+  if (link.bot_a === botId) return "a";
+  if (link.bot_b === botId) return "b";
+  return null;
+}
+
+export function peerId(link: Pick<LinkRow, "bot_a" | "bot_b">, botId: string): string | null {
+  const side = sideOf(link, botId);
+  if (side === "a") return link.bot_b;
+  if (side === "b") return link.bot_a;
+  return null;
+}

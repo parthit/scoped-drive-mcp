@@ -608,6 +608,10 @@ tests/                        pytest suite with a fake Drive (owner and bot view
   `/mcp` starts a short-lived stateless session manager **inside each request**. This works the same under
   uvicorn, Vercel and test clients without lifespan.
 
+## Bot Bridge
+
+A separate mailbox MCP, for two Grok Bots in different accounts, lives in [`bot-bridge/`](bot-bridge/). It is its own TypeScript app and its own Vercel project. It does not share this server's Drive allowlist, tokens, or OAuth. Setup and the two-person test are in [`bot-bridge/README.md`](bot-bridge/README.md) and [`bot-bridge/docs/TESTING.md`](bot-bridge/docs/TESTING.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, tests, and pull requests. This project is licensed under the [MIT License](LICENSE).
