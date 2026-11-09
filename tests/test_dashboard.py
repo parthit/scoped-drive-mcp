@@ -130,14 +130,26 @@ def test_login_next_cannot_redirect_offsite(c) -> None:
     assert r.headers["location"] == "/"
 
 
-@pytest.mark.parametrize("code", ["eve-code", "bot-code", "unverified-owner-code"])
-def test_wrong_account_cannot_sign_in(c, oauth, memstore, code: str) -> None:
-    r = login(c, code)
+def test_unverified_account_cannot_sign_in(c, oauth, memstore) -> None:
+    r = login(c, "unverified-owner-code")
     assert r.status_code == 403
     assert "not allowed" in r.text
     assert c.get("/browse").status_code == 303  # still logged out
     assert memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY) is None
     assert oauth.revoked  # the unwanted token was revoked
+
+
+def test_second_verified_account_can_sign_in(c, memstore, p2_app) -> None:
+    r = login(c, "eve-code")
+    assert r.status_code == 303
+    assert c.get("/browse").status_code == 200
+    # The admin's legacy key stays empty; eve's token is under her prefix.
+    assert memstore.get(KEY_PREFIX + OWNER_TOKEN_KEY) is None
+    raw = memstore.get(KEY_PREFIX + "u:eve@example.com:" + OWNER_TOKEN_KEY)
+    assert raw and "rt-eve" not in raw
+    assert p2_app.state.dashboard.directory.has_owner_refresh("eve@example.com")
+    assert c.get("/admin").status_code == 404
+    assert 'href="/admin"' not in c.get("/").text
 
 
 def test_state_is_checked(c) -> None:

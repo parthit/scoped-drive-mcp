@@ -374,3 +374,87 @@ class LazyBotDriveClient:
         return self._inner().update(
             file_id, check_update_metadata(metadata), content, content_mime, fields
         )
+
+
+class RoutingDriveClient:
+    """Sends each Drive call to the admin's client or to that person's bot.
+
+    Tests that inject one Drive client keep using it for the admin and for API tokens.
+    Any other actor resolves their own bot refresh token and builds a client with
+    `bot_drive_factory`. A missing bot is the same error the dashboard already shows.
+    """
+
+    def __init__(
+        self,
+        admin_client: DriveClient,
+        admin_email: str | None,
+        token_for: Callable[[str], str | None],
+        factory: Callable[[str], DriveClient],
+    ):
+        self._admin = admin_client
+        self._admin_email = admin_email
+        self._token_for = token_for
+        self._factory = factory
+        self._lock = threading.Lock()
+        self._clients: dict[str, tuple[str, DriveClient]] = {}
+
+    def invalidate(self, email: str | None = None) -> None:
+        with self._lock:
+            if email is None or email == self._admin_email:
+                self._clients.clear()
+            else:
+                self._clients.pop(email, None)
+        inner = getattr(self._admin, "invalidate", None)
+        if (email is None or email == self._admin_email) and callable(inner):
+            inner()
+
+    def _client(self) -> DriveClient:
+        from .auth import current_actor
+
+        actor = current_actor.get()
+        if not actor or actor == self._admin_email:
+            return self._admin
+        token = self._token_for(actor)
+        if not token:
+            raise BotNotConnectedError("the bot account is not connected", BOT_NOT_CONNECTED)
+        with self._lock:
+            cached = self._clients.get(actor)
+            if cached is not None and cached[0] == token:
+                return cached[1]
+        client = self._factory(token)
+        with self._lock:
+            self._clients[actor] = (token, client)
+        return client
+
+    def get_file(self, file_id: str, fields: str) -> dict[str, Any]:
+        return self._client().get_file(file_id, fields)
+
+    def list_files(
+        self, q: str, fields: str, page_size: int, page_token: str | None = None
+    ) -> dict[str, Any]:
+        return self._client().list_files(q, fields, page_size, page_token)
+
+    def export(self, file_id: str, mime_type: str) -> bytes:
+        return self._client().export(file_id, mime_type)
+
+    def download(self, file_id: str, max_bytes: int) -> bytes:
+        return self._client().download(file_id, max_bytes)
+
+    def create(
+        self,
+        metadata: dict[str, Any],
+        content: bytes | None,
+        content_mime: str | None,
+        fields: str,
+    ) -> dict[str, Any]:
+        return self._client().create(metadata, content, content_mime, fields)
+
+    def update(
+        self,
+        file_id: str,
+        metadata: dict[str, Any] | None,
+        content: bytes | None,
+        content_mime: str | None,
+        fields: str,
+    ) -> dict[str, Any]:
+        return self._client().update(file_id, metadata, content, content_mime, fields)

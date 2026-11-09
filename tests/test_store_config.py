@@ -5,6 +5,7 @@ import secrets
 import pytest
 from pydantic import ValidationError
 
+from scoped_drive_mcp.auth import current_actor
 from scoped_drive_mcp.config import Settings
 from scoped_drive_mcp.drive_client import BotNotConnectedError, LazyBotDriveClient
 from scoped_drive_mcp.store import (
@@ -16,6 +17,7 @@ from scoped_drive_mcp.store import (
     RedisStore,
     TokenVault,
     build_store,
+    import_admin_keys,
 )
 from tests.conftest import API_TOKENS, ENCRYPTION_KEY, FakeClock, make_settings
 
@@ -196,6 +198,63 @@ def test_lazy_bot_client_prefers_env_then_store() -> None:
     env = LazyBotDriveClient("from-env", lambda: "from-store", factory)
     env._inner()
     assert built[-1] == "from-env"
+
+
+def test_actor_store_keeps_admin_keys_and_prefixes_others() -> None:
+    from scoped_drive_mcp.store import ActorStore
+
+    inner = MemoryStore()
+    actor = ActorStore(PrefixedStore(inner), "owner@example.com")
+    token = current_actor.set("owner@example.com")
+    try:
+        actor.set("allowlist", "admin")
+    finally:
+        current_actor.reset(token)
+    token = current_actor.set("eve@example.com")
+    try:
+        actor.set("allowlist", "eve")
+    finally:
+        current_actor.reset(token)
+    assert inner.get("sdm:allowlist") == "admin"
+    assert inner.get("sdm:u:eve@example.com:allowlist") == "eve"
+    unset = current_actor.set(None)
+    try:
+        assert actor.get("allowlist") == "admin"
+    finally:
+        current_actor.reset(unset)
+
+
+def test_import_admin_keys_runs_once() -> None:
+    source = MemoryStore()
+    dest = MemoryStore()
+    source.hset("sdm:allowlist", "file-1", "{}")
+    source.set("sdm:vault:owner_refresh_token", "enc-owner")
+    source.set("sdm:vault:bot_refresh_token", "enc-bot")
+    source.lpush("sdm:activity", "older")
+    source.lpush("sdm:activity", "newer")
+    source.lpush("sdm:requests:index", "rid")
+    source.set("sdm:req:rid", '{"file_id":"file-1"}')
+    source.set("sdm:req:pending:file-1", "rid")
+    import_admin_keys(source, dest)
+    import_admin_keys(source, dest)
+    assert dest.hget("sdm:allowlist", "file-1") == "{}"
+    assert dest.get("sdm:vault:owner_refresh_token") == "enc-owner"
+    assert dest.get("sdm:vault:bot_refresh_token") == "enc-bot"
+    assert dest.lrange("sdm:activity", 0, -1) == ["newer", "older"]
+    assert dest.get("sdm:req:rid") == '{"file_id":"file-1"}'
+    assert dest.get("sdm:req:pending:file-1") == "rid"
+    assert dest.get("sdm:meta:redis_admin_imported")
+
+
+def test_postgres_url_is_not_in_repr() -> None:
+    url = "postgresql://user:secret-token@localhost/db"
+    settings = make_settings(database_url=url)
+    assert settings.postgres_configured
+    assert "secret-token" not in repr(settings)
+    store = build_store(settings)
+    assert store.kind == "postgres"
+    assert "secret-token" not in repr(store)
+    assert settings.missing_settings() == []
 
 
 def test_make_secrets_script(capsys) -> None:
