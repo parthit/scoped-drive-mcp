@@ -1,7 +1,8 @@
 """Scope guard: every file the server touches must be allowlisted or live under an
 allowlisted folder.
 
-The allowlist is what the owner ticked in the dashboard, plus ROOT_FOLDER_ID if set.
+The allowlist is what that person ticked in the dashboard. ROOT_FOLDER_ID is added
+only for the admin (and for an unset actor, which single-tenant tests use).
 
 Rules:
 - A file is in scope if its own id is allowlisted, or if walking up its `parents`
@@ -127,6 +128,7 @@ class ScopeGuard:
         *,
         allowlist: AllowlistSource | None = None,
         allowlist_ttl: float = 2.0,
+        admin_email: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         max_depth: int = 64,
         max_lookups: int = 256,
@@ -139,6 +141,7 @@ class ScopeGuard:
         self.ttl = ttl
         self.allowlist_source = allowlist
         self.allowlist_ttl = allowlist_ttl
+        self.admin_email = admin_email
         self._clock = clock
         self.max_depth = max_depth
         self.max_lookups = max_lookups
@@ -158,8 +161,25 @@ class ScopeGuard:
 
     # ---- allowlist -----------------------------------------------------
 
+    def _root_for_actor(self) -> str | None:
+        """The deployment root, only for the admin.
+
+        `ROOT_FOLDER_ID` is an extra folder on the admin's Drive. Other tenants must
+        not inherit it. An unset actor is the admin (single-tenant tests and calls
+        that have not entered the middleware). When no admin email was given, the
+        root stays in scope so those tests keep working.
+        """
+        if not self.root_id:
+            return None
+        if self.admin_email is None:
+            return self.root_id
+        who = self._who()
+        if not who or who == self.admin_email:
+            return self.root_id
+        return None
+
     def allowed(self) -> dict[str, str]:
-        """Allowlisted id -> mime type (ROOT_FOLDER_ID included), cached for `allowlist_ttl`."""
+        """Allowlisted id -> mime type, plus the admin's ROOT_FOLDER_ID, cached."""
         who = self._who()
         now = self._clock()
         with self._lock:
@@ -169,8 +189,9 @@ class ScopeGuard:
         items: dict[str, str] = {}
         if self.allowlist_source is not None:
             items.update(self.allowlist_source())
-        if self.root_id:
-            items[self.root_id] = FOLDER_MIME
+        root = self._root_for_actor()
+        if root:
+            items[root] = FOLDER_MIME
         with self._lock:
             self._allowed[who] = (now + self.allowlist_ttl, items)
         return items
@@ -182,9 +203,10 @@ class ScopeGuard:
             self._folders.pop(who, None)
 
     def default_parent(self) -> str | None:
-        """Where creates go without a parent_id: ROOT_FOLDER_ID, else the only allowed folder."""
-        if self.root_id:
-            return self.root_id
+        """Where creates go without a parent_id: the admin's root, else the only folder."""
+        root = self._root_for_actor()
+        if root:
+            return root
         folders = [fid for fid, mime in self.allowed().items() if mime == FOLDER_MIME]
         return folders[0] if len(folders) == 1 else None
 

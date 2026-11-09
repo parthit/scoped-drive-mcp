@@ -156,6 +156,12 @@ class DashboardContext:
             return "separate_bot"
         return self.settings.mode
 
+    def visible_root_folder_id(self) -> str | None:
+        """The deployment root is the admin's folder. Other people do not see its id."""
+        if self._admin_actor():
+            return self.settings.root_folder_id
+        return None
+
     def view_bot_email(self) -> str | None:
         if self._admin_actor():
             if self.settings.same_account:
@@ -575,7 +581,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             "overview.html",
             missing=settings.missing_settings(),
             store_kind=getattr(ctx.store, "kind", "custom"),
-            root_folder_id=settings.root_folder_id,
+            root_folder_id=ctx.visible_root_folder_id(),
             mcp_url=f"{settings.app_base_url}/mcp",
             mode=ctx.view_mode(),
             bot_email=ctx.view_bot_email(),
@@ -700,7 +706,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "access.html",
             rows=rows,
-            root_folder_id=settings.root_folder_id,
+            root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
             mode=ctx.view_mode(),
             bot=data["bot"],

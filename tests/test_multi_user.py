@@ -174,6 +174,74 @@ def test_bot_address_rules(world, memstore, oauth) -> None:
     assert emails == [EVE_BOT_2]
 
 
+def test_root_folder_id_is_only_the_admins(world, memstore, oauth) -> None:
+    drive = FakeDrive()
+    drive.add("admin-root", "Admin root", FOLDER_MIME, [])
+    drive.add("admin-child", "Admin note", "text/plain", ["admin-root"], b"admin")
+    drive.add("eve-folder", "Eve folder", FOLDER_MIME, [])
+    drive.add("eve-child", "Eve note", "text/plain", ["eve-folder"], b"eve")
+
+    def allow() -> dict[str, str]:
+        if current_actor.get() == EVE:
+            return {"eve-folder": FOLDER_MIME}
+        return {}
+
+    guard = ScopeGuard(
+        drive,
+        "admin-root",
+        allowlist=allow,
+        allowlist_ttl=0,
+        admin_email=OWNER_EMAIL,
+    )
+    admin = current_actor.set(OWNER_EMAIL)
+    try:
+        assert guard.is_in_scope("admin-child")
+        assert guard.default_parent() == "admin-root"
+        assert "admin-root" in guard.allowed()
+    finally:
+        current_actor.reset(admin)
+    unset = current_actor.set(None)
+    try:
+        assert guard.is_in_scope("admin-child")
+        assert guard.default_parent() == "admin-root"
+    finally:
+        current_actor.reset(unset)
+    eve_actor = current_actor.set(EVE)
+    try:
+        assert not guard.is_in_scope("admin-child")
+        assert guard.is_in_scope("eve-child")
+        assert guard.default_parent() == "eve-folder"
+        assert "admin-root" not in guard.allowed()
+    finally:
+        current_actor.reset(eve_actor)
+
+    _accounts(oauth)
+    _extend(world)
+
+    def drive_for(token: str) -> FakeDrive:
+        return world.as_user(token.removeprefix("rt-"))
+
+    app = build_app(
+        make_settings(
+            root_folder_id="admin-root",
+            google_oauth_refresh_token=None,
+            allowlist_cache_ttl=0,
+        ),
+        store=memstore,
+        owner_drive_factory=drive_for,
+        oauth=oauth,
+        bot_drive_factory=drive_for,
+    )
+    admin_page = client(app)
+    eve_page = client(app)
+    assert login(admin_page).status_code == 303
+    assert login(eve_page, "eve-code").status_code == 303
+    assert "admin-root" in admin_page.get("/access").text
+    assert "admin-root" in admin_page.get("/").text
+    assert "admin-root" not in eve_page.get("/access").text
+    assert "admin-root" not in eve_page.get("/").text
+
+
 def test_scope_cache_is_partitioned_by_actor() -> None:
     def source() -> dict[str, str]:
         actor = current_actor.get()

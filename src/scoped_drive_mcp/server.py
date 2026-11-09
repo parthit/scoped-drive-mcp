@@ -402,6 +402,7 @@ def build_app(
             ttl=settings.scope_cache_ttl,
             allowlist=allowlist.mime_map,
             allowlist_ttl=settings.allowlist_cache_ttl,
+            admin_email=settings.owner_email,
         )
     else:
         guard = guard_factory(routed, settings, allowlist.mime_map)

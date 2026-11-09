@@ -29,6 +29,16 @@ OWNER_TOKEN_KEY = "vault:owner_refresh_token"  # noqa: S105 - a key name
 BOT_TOKEN_KEY = "vault:bot_refresh_token"  # noqa: S105 - a key name
 USERS_INDEX = "users:index"
 REDIS_IMPORT_FLAG = "sdm:meta:redis_admin_imported"  # on the raw store, not the sdm: view
+REDIS_IMPORT_LOCK = "sdm:meta:redis_admin_import_lock"  # same raw store; expires if a copy dies
+REDIS_IMPORT_LOCK_TTL = 120
+
+_REPLACE_LIST_SCRIPT = """
+redis.call('DEL', KEYS[1])
+for i = #ARGV, 1, -1 do
+    redis.call('LPUSH', KEYS[1], ARGV[i])
+end
+return #ARGV
+"""
 
 
 def utc_now() -> str:
@@ -136,6 +146,20 @@ class MemoryStore:
             end = None if stop == -1 else stop + 1
             return list(current[start:end])
 
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+        """Set `key` only when it is missing or expired. True when this caller won."""
+        with self._lock:
+            if self._live(key) is not None:
+                return False
+            expires = self._clock() + ex if ex else None
+            self._values[key] = (expires, value)
+            return True
+
+    def replace_list(self, key: str, items: list[str]) -> None:
+        """Replace a list in one step. `items` is newest-first, the same order as `lrange`."""
+        with self._lock:
+            self._values[key] = (None, list(items))
+
 
 class RedisStore:
     """Upstash Redis over its REST API (`upstash-redis`)."""
@@ -182,6 +206,15 @@ class RedisStore:
 
     def lrange(self, key: str, start: int, stop: int) -> list[str]:
         return [str(v) for v in self._redis.lrange(key, start, stop) or []]
+
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+        """SET NX with a TTL. True only when this caller created the key."""
+        result = self._redis.set(key, value, nx=True, ex=ex)
+        return result is True or result == "OK"
+
+    def replace_list(self, key: str, items: list[str]) -> None:
+        """Replace a list in one Redis script so two copies cannot interleave item by item."""
+        self._redis.eval(_REPLACE_LIST_SCRIPT, keys=[key], args=list(items))
 
 
 class PrefixedStore:
@@ -480,6 +513,45 @@ class PostgresStore:
 
         return self._run(read)
 
+    def set_if_absent(self, key: str, value: str, ex: int) -> bool:
+        """Insert a row only when the key is missing. An expired row is cleared first."""
+
+        def claim(conn: Any) -> bool:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    DELETE FROM sdm_kv
+                    WHERE key = %s AND expires_at IS NOT NULL AND expires_at <= NOW()
+                    """,
+                    (key,),
+                )
+                row = conn.execute(
+                    """
+                    INSERT INTO sdm_kv (key, value, expires_at)
+                    VALUES (%s, %s, NOW() + (%s * INTERVAL '1 second'))
+                    ON CONFLICT (key) DO NOTHING
+                    RETURNING key
+                    """,
+                    (key, value, ex),
+                ).fetchone()
+                return row is not None
+
+        return bool(self._run(claim))
+
+    def replace_list(self, key: str, items: list[str]) -> None:
+        """Delete and rewrite a list in one transaction. `items` is newest-first."""
+
+        def write(conn: Any) -> None:
+            with conn.transaction():
+                conn.execute("DELETE FROM sdm_list WHERE key = %s", (key,))
+                for item in reversed(items):
+                    conn.execute(
+                        "INSERT INTO sdm_list (key, value) VALUES (%s, %s)",
+                        (key, item),
+                    )
+
+        self._run(write)
+
 
 # ---- allowlist -------------------------------------------------------------
 
@@ -631,10 +703,22 @@ def _copy_hash(source: KeyValueStore, dest: KeyValueStore, key: str) -> None:
 
 
 def _copy_list(source: KeyValueStore, dest: KeyValueStore, key: str) -> None:
+    """Replace `key` with the source list in one step when the destination can.
+
+    Pushing one item at a time lets two copies interleave and duplicate the list.
+    """
     items = source.lrange(key, 0, -1)
-    dest.delete(key)
-    for item in reversed(items):
-        dest.lpush(key, item)
+    replace = getattr(dest, "replace_list", None)
+    if replace is None:
+        dest.delete(key)
+        for item in reversed(items):
+            dest.lpush(key, item)
+        return
+    replace(key, items)
+
+
+class StoreImportError(RuntimeError):
+    """The admin store was not copied, so Postgres must not be served."""
 
 
 def import_admin_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
@@ -642,29 +726,47 @@ def import_admin_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
 
     Only the legacy admin keys move: allowlist, encrypted tokens, requests and activity.
     OAuth grants and other people's prefixes are left where they are. A flag on the
-    destination stops a second copy from duplicating the activity list.
+    destination stops a second copy. The flag is written only after the copy finishes.
+    A lock so two serverless instances cannot both copy the activity list and the
+    request index. The loser raises `StoreImportError` and must not be served as the
+    live store. Lists are replaced in one step so a retry cannot splice duplicates in.
     """
     if dest.get(REDIS_IMPORT_FLAG):
         return
-    _copy_hash(source, dest, KEY_PREFIX + ALLOWLIST_KEY)
-    _copy_string(source, dest, KEY_PREFIX + OWNER_TOKEN_KEY)
-    _copy_string(source, dest, KEY_PREFIX + BOT_TOKEN_KEY)
-    _copy_list(source, dest, KEY_PREFIX + ACTIVITY_KEY)
-    index_key = KEY_PREFIX + "requests:index"
-    _copy_list(source, dest, index_key)
-    for rid in dest.lrange(index_key, 0, -1):
-        raw = source.get(f"{KEY_PREFIX}req:{rid}")
-        if raw is None:
-            continue
-        dest.set(f"{KEY_PREFIX}req:{rid}", raw)
+    claim = getattr(dest, "set_if_absent", None)
+    if claim is None or not claim(REDIS_IMPORT_LOCK, utc_now(), REDIS_IMPORT_LOCK_TTL):
+        raise StoreImportError("admin store copy is already running")
+    try:
+        if dest.get(REDIS_IMPORT_FLAG):
+            return
+        _copy_hash(source, dest, KEY_PREFIX + ALLOWLIST_KEY)
+        _copy_string(source, dest, KEY_PREFIX + OWNER_TOKEN_KEY)
+        _copy_string(source, dest, KEY_PREFIX + BOT_TOKEN_KEY)
+        _copy_list(source, dest, KEY_PREFIX + ACTIVITY_KEY)
+        index_key = KEY_PREFIX + "requests:index"
+        _copy_list(source, dest, index_key)
+        for rid in dest.lrange(index_key, 0, -1):
+            raw = source.get(f"{KEY_PREFIX}req:{rid}")
+            if raw is None:
+                continue
+            dest.set(f"{KEY_PREFIX}req:{rid}", raw)
+            try:
+                file_id = json.loads(raw).get("file_id")
+            except ValueError:
+                file_id = None
+            if isinstance(file_id, str) and file_id:
+                _copy_string(source, dest, f"{KEY_PREFIX}req:pending:{file_id}")
+        _scan_request_keys(source, dest)
+        dest.set(REDIS_IMPORT_FLAG, utc_now())
+    finally:
         try:
-            file_id = json.loads(raw).get("file_id")
-        except ValueError:
-            file_id = None
-        if isinstance(file_id, str) and file_id:
-            _copy_string(source, dest, f"{KEY_PREFIX}req:pending:{file_id}")
-    _scan_request_keys(source, dest)
-    dest.set(REDIS_IMPORT_FLAG, utc_now())
+            dest.delete(REDIS_IMPORT_LOCK)
+        except Exception as exc:
+            # The driver message can contain the connection URL.
+            logger.warning(
+                "releasing the Redis-to-Postgres import lock failed (%s)",
+                type(exc).__name__,
+            )
 
 
 def _scan_request_keys(source: KeyValueStore, dest: KeyValueStore) -> None:
@@ -764,12 +866,15 @@ def build_store(settings: Any) -> PrefixedStore:
             )
             try:
                 import_admin_keys(redis, inner)
+            except StoreImportError:
+                raise
             except Exception as exc:
                 # The exception text from the driver can contain the connection URL.
                 logger.warning(
                     "copying the admin store from Redis to Postgres failed (%s)",
                     type(exc).__name__,
                 )
+                raise StoreImportError("admin store was not copied from Redis") from None
         return PrefixedStore(inner)
     if settings.redis_configured:
         inner = RedisStore(
