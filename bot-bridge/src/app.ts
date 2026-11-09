@@ -14,7 +14,7 @@ import {
   registeredPage,
 } from "./pages.js";
 import { PLAYBOOK } from "./playbook.js";
-import { newId, safeEqual, sha256 } from "./ids.js";
+import { safeEqual, sha256 } from "./ids.js";
 import { limitsFromEnv, type Limits } from "./limits.js";
 import { createDefaultStore, type Store } from "./store/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -282,21 +282,7 @@ function clientIp(c: { req: { header: (name: string) => string | undefined } }):
 const REGISTER_WINDOW_MS = 60 * 60 * 1000;
 
 async function allowRegister(store: Store, ip: string, limit: number, now: Date): Promise<boolean> {
-  const actor = `register:${sha256(ip)}`;
-  return store.transaction(async (tx) => {
-    const since = new Date(now.getTime() - REGISTER_WINDOW_MS);
-    const count = await tx.countAuditsSince(actor, ["register"], since);
-    if (count >= limit) return false;
-    await tx.insertAudit({
-      event_id: newId("aud"),
-      actor,
-      action: "register",
-      link_id: null,
-      meta_json: {},
-      created_at: now,
-    });
-    return true;
-  });
+  return store.tryConsumeRate(`register:${sha256(ip)}`, now, REGISTER_WINDOW_MS, limit);
 }
 
 async function readObject(c: { req: { header: (name: string) => string | undefined; json: () => Promise<unknown>; parseBody: () => Promise<Record<string, unknown>> } }): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; message: string }> {

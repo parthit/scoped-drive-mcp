@@ -93,6 +93,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS audit_actor_idx
   ON audit_events (actor, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS rate_locks (
+  actor TEXT PRIMARY KEY,
+  window_start TIMESTAMPTZ NOT NULL,
+  hits INTEGER NOT NULL
+);
 `;
 
 export function schemaStatements(sql = SCHEMA_SQL): string[] {

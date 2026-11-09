@@ -16,6 +16,7 @@ export class MemoryStore implements Store {
   private manage = new Map<string, ManageRow>();
   private messages = new Map<string, MessageRow>();
   private audits: AuditRow[] = [];
+  private rates = new Map<string, { windowStart: number; hits: number }>();
 
   transaction<T>(fn: (tx: Store) => Promise<T>): Promise<T> {
     const run = this.queue.then(() => fn(this));
@@ -37,6 +38,7 @@ export class MemoryStore implements Store {
     this.manage.clear();
     this.messages.clear();
     this.audits = [];
+    this.rates.clear();
   }
 
   async insertUser(row: UserRow): Promise<void> {
@@ -303,6 +305,18 @@ export class MemoryStore implements Store {
       .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
       .slice(0, 20)
       .map((row) => copy(row));
+  }
+
+  async tryConsumeRate(actor: string, now: Date, windowMs: number, limit: number): Promise<boolean> {
+    const cutoff = now.getTime() - windowMs;
+    const current = this.rates.get(actor);
+    if (!current || current.windowStart <= cutoff) {
+      this.rates.set(actor, { windowStart: now.getTime(), hits: 1 });
+      return true;
+    }
+    if (current.hits >= limit) return false;
+    current.hits += 1;
+    return true;
   }
 
   async insertAudit(row: AuditRow): Promise<void> {

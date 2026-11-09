@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { createApp } from "../src/app.js";
 import { Bridge } from "../src/bridge.js";
 import { UNTRUSTED_START } from "../src/content.js";
 import type { Limits } from "../src/limits.js";
@@ -259,6 +260,35 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
       if (!expired.ok) expect(expired.error).toBe("expired");
       const fresh = must(await app.listLinks(blair, BASE));
       expect(must(await app.decideApproval(tokenOf(fresh.links[0]?.approval_url), "approve", BASE)).status).toBe("pending_approval");
+    });
+
+    test("signup cap resets when the window expires", async () => {
+      const actor = "register:window";
+      const start = new Date("2026-01-01T00:00:00.000Z");
+      expect(await store.tryConsumeRate(actor, start, 60 * 60 * 1000, 1)).toBe(true);
+      expect(await store.tryConsumeRate(actor, new Date(start.getTime() + 1000), 60 * 60 * 1000, 1)).toBe(false);
+      expect(await store.tryConsumeRate(actor, new Date(start.getTime() + 60 * 60 * 1000 + 1), 60 * 60 * 1000, 1)).toBe(true);
+    });
+
+    test("parallel signups from one address share one cap", async () => {
+      const server = createApp({ store, baseUrl: BASE, registerPerHour: 2 });
+      const headers = {
+        "content-type": "application/json",
+        accept: "application/json",
+        "x-real-ip": "198.51.100.20",
+      };
+      const responses = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          server.request(`${BASE}/register`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ display_name: "Alex" }),
+          }),
+        ),
+      );
+      const statuses = responses.map((response) => response.status);
+      expect(statuses.filter((status) => status === 201)).toHaveLength(2);
+      expect(statuses.filter((status) => status === 429)).toHaveLength(4);
     });
 
     test("a consumed approval cannot be reopened by a stale refresh", async () => {

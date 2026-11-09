@@ -54,6 +54,7 @@ export interface Store {
   threadLinkIds(threadId: string): Promise<string[]>;
   messagesInThreadForBot(threadId: string, botId: string, now: Date): Promise<MessageRow[]>;
 
+  tryConsumeRate(actor: string, now: Date, windowMs: number, limit: number): Promise<boolean>;
   insertAudit(row: AuditRow): Promise<void>;
   countAuditsSince(actor: string, actions: string[], since: Date): Promise<number>;
   oldestAuditSince(actor: string, actions: string[], since: Date): Promise<Date | null>;

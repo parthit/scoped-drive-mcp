@@ -27,7 +27,7 @@ describe("untrusted content", () => {
 
   test("schema covers the mailbox tables", () => {
     const sql = schemaStatements().join("\n");
-    for (const table of ["users", "bots", "links", "messages", "audit_events", "approvals", "manage_tokens"]) {
+    for (const table of ["users", "bots", "links", "messages", "audit_events", "approvals", "manage_tokens", "rate_locks"]) {
       expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
     }
   });
