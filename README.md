@@ -27,6 +27,14 @@ New here? Follow the [Phase 2 setup and test walkthrough](#phase-2-setup-and-tes
 single-folder setup (phase 1) still works and is described further down. See [docs/PLAN.md](docs/PLAN.md) for
 the design notes.
 
+## Bot Bridge
+
+This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server that lets
+two people's bots exchange short text messages after both humans approve. It has its own `package.json`, tests,
+and Vercel config, and it is deployed as a **separate** Vercel project with Root Directory `bot-bridge` (the
+root `vercel.json` stays the Python app). How to run and test it is in
+[bot-bridge/docs/TESTING.md](bot-bridge/docs/TESTING.md).
+
 ## Tools and roles
 
 | Tool | viewer | editor | admin |
@@ -547,6 +555,7 @@ After changing dependencies, regenerate Vercel's requirements file:
 
 ```
 api/index.py                  Vercel entry point (app = build_app())
+bot-bridge/                   separate pairing mailbox; own package, tests, and Vercel project
 vercel.json                   routes everything to api/index.py, maxDuration, bundles templates
 requirements.txt              runtime deps for Vercel (exported from uv.lock)
 scripts/bootstrap_oauth.py    optional: one-time bot sign-in → refresh token (phase 1 route)
