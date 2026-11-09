@@ -43,6 +43,7 @@ from .drive_client import (
     GoogleOwnerDriveClient,
     LazyBotDriveClient,
     OwnerDriveClient,
+    RoutingDriveClient,
     oauth_credentials,
 )
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
@@ -50,7 +51,15 @@ from .oauth import GoogleOAuthClient, OAuthClient
 from .policy import is_allowed, require
 from .scope import ScopeGuard
 from .service import DriveService
-from .store import ActivityLog, Allowlist, KeyValueStore, PrefixedStore, TokenVault, build_store
+from .store import (
+    ActivityLog,
+    Allowlist,
+    KeyValueStore,
+    PrefixedStore,
+    TenantDirectory,
+    TokenVault,
+    build_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +275,8 @@ STORAGE_MISSING = (
     "Redis is not configured. On Vercel, memory does not survive between requests, so grants, "
     "requests and stored sign-ins would be lost. Connect an Upstash Redis database (it sets "
     "KV_REST_API_URL and KV_REST_API_TOKEN) or set UPSTASH_REDIS_REST_URL and "
-    "UPSTASH_REDIS_REST_TOKEN, then redeploy."
+    "UPSTASH_REDIS_REST_TOKEN, or connect Neon (it sets DATABASE_URL or POSTGRES_URL), "
+    "then redeploy."
 )
 
 
@@ -339,23 +349,34 @@ def build_app(
         except ValidationError as exc:
             return _misconfigured_app(exc)
 
-    if store is None and not settings.redis_configured and running_on_vercel():
+    if (
+        store is None
+        and not settings.redis_configured
+        and not settings.postgres_configured
+        and running_on_vercel()
+    ):
         return _storage_missing_app(settings)
 
     kv = PrefixedStore(store) if store is not None else build_store(settings)
-    allowlist = Allowlist(kv)
-    vault = TokenVault(
-        kv, settings.encryption_key.get_secret_value() if settings.encryption_key else None
-    )
-    requests = AccessRequests(kv)
-    activity = ActivityLog(kv)
+    enc_key = settings.encryption_key.get_secret_value() if settings.encryption_key else None
+    directory = TenantDirectory(kv, settings.owner_email, enc_key)
+    actor_kv = directory.actor_store()
+    allowlist = Allowlist(actor_kv)
+    vault = TokenVault(actor_kv, enc_key)
+    requests = AccessRequests(actor_kv)
+    activity = ActivityLog(actor_kv)
     audit_module.set_sinks([activity])
 
     def stored_bot_token() -> str | None:
-        # Same-account mode: the tools act as the owner, limited only by the allowlist.
+        # Admin same-account mode: the tools act as the owner, limited only by the allowlist.
+        # The actor is the admin here; other people never use this client.
         if not vault.enabled:
             return None
         record = vault.owner() if settings.same_account else vault.bot()
+        return record.get("t") if record else None
+
+    def user_bot_token(email: str) -> str | None:
+        record = directory.vault_for(email).bot()
         return record.get("t") if record else None
 
     if drive_client is None:
@@ -367,18 +388,25 @@ def build_app(
                 OWNER_NOT_SIGNED_IN if settings.same_account else BOT_NOT_CONNECTED
             ),
         )
+    routed = RoutingDriveClient(
+        drive_client,
+        settings.owner_email,
+        user_bot_token,
+        bot_drive_factory or _bot_factory(settings),
+    )
 
     if guard_factory is None:
         guard = ScopeGuard(
-            drive_client,
+            routed,
             settings.root_folder_id,
             ttl=settings.scope_cache_ttl,
             allowlist=allowlist.mime_map,
             allowlist_ttl=settings.allowlist_cache_ttl,
+            admin_email=settings.owner_email,
         )
     else:
-        guard = guard_factory(drive_client, settings, allowlist.mime_map)
-    service = DriveService(drive_client, guard, settings)
+        guard = guard_factory(routed, settings, allowlist.mime_map)
+    service = DriveService(routed, guard, settings)
     access = (
         AccessService(requests, settings.app_base_url, guard, service.peek_name)
         if settings.app_base_url
@@ -396,7 +424,7 @@ def build_app(
         )
     base_url = settings.app_base_url
     mcp_oauth = (
-        McpOAuth(kv, base_url, settings.owner_email)
+        McpOAuth(kv, base_url, settings.owner_email, signed_in=directory.has_owner_refresh)
         if base_url and not settings.dashboard_missing()
         else None
     )
@@ -412,6 +440,8 @@ def build_app(
         bot_drive=drive_client,
         on_allowlist_change=guard.invalidate_allowlist,
         mcp_oauth=mcp_oauth,
+        directory=directory,
+        drive_router=routed,
     )
     dashboard = build_dashboard(ctx)
 
@@ -428,8 +458,9 @@ def build_app(
             body["owner_connected"] = await anyio.to_thread.run_sync(ctx.owner_connected)
             body["bot_connected"] = bot["connected"]
             body["bot_source"] = bot["source"]
-        except Exception:
-            logger.warning("health: store unavailable", exc_info=True)
+        except Exception as exc:
+            # Driver errors can include a database URL. Log the type only.
+            logger.warning("health: store unavailable (%s)", type(exc).__name__)
             body["status"] = "degraded"
             body["store_error"] = True
         return JSONResponse(body)
@@ -442,6 +473,7 @@ def build_app(
         resource_metadata=(
             None if mcp_oauth is None else protected_resource_metadata_url(base_url)
         ),
+        owner_email=settings.owner_email,
     )
     routes: list[Any] = [
         Route(HEALTH_PATH, health, methods=["GET"]),

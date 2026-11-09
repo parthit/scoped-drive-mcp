@@ -152,7 +152,12 @@ def app(drive: FakeDrive, settings: Settings, clock: FakeClock):
         settings,
         drive,
         guard_factory=lambda d, s, allow: ScopeGuard(
-            d, s.root_folder_id, ttl=s.scope_cache_ttl, allowlist=allow, clock=clock
+            d,
+            s.root_folder_id,
+            ttl=s.scope_cache_ttl,
+            allowlist=allow,
+            clock=clock,
+            admin_email=s.owner_email,
         ),
         store=MemoryStore(),
     )

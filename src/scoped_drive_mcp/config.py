@@ -101,6 +101,11 @@ class Settings(BaseSettings):
             "redis_rest_token", "upstash_redis_rest_token", "kv_rest_api_token"
         ),
     )
+    # Vercel Marketplace Neon injects a pooled DATABASE_URL (or POSTGRES_URL).
+    database_url: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("database_url", "postgres_url"),
+    )
 
     max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
@@ -120,6 +125,7 @@ class Settings(BaseSettings):
         "session_secret",
         "encryption_key",
         "redis_rest_token",
+        "database_url",
         mode="before",
     )
     @classmethod
@@ -161,6 +167,16 @@ class Settings(BaseSettings):
         if scheme == "http" and host in _LOCAL_HOSTS:
             return value
         raise ValueError("APP_BASE_URL must be https://... (http:// only for localhost)")
+
+    @field_validator("database_url")
+    @classmethod
+    def _check_database_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        url = value.get_secret_value().strip()
+        if not url.startswith(("postgres://", "postgresql://")):
+            raise ValueError("DATABASE_URL must start with postgres:// or postgresql://")
+        return SecretStr(url)
 
     @field_validator("redis_rest_url")
     @classmethod
@@ -223,6 +239,16 @@ class Settings(BaseSettings):
         return bool(self.redis_rest_url) and _secret_set(self.redis_rest_token)
 
     @property
+    def postgres_configured(self) -> bool:
+        return _secret_set(self.database_url)
+
+    @property
+    def postgres_url(self) -> str | None:
+        if not self.postgres_configured or self.database_url is None:
+            return None
+        return self.database_url.get_secret_value()
+
+    @property
     def env_bot_refresh_token(self) -> str | None:
         if _secret_set(self.google_oauth_refresh_token):
             assert self.google_oauth_refresh_token is not None
@@ -241,7 +267,10 @@ class Settings(BaseSettings):
             ("UPSTASH_REDIS_REST_URL", self.redis_rest_url is not None),
             ("UPSTASH_REDIS_REST_TOKEN", _secret_set(self.redis_rest_token)),
         ]
-        return [name for name, ok in checks if not ok]
+        missing = [name for name, ok in checks if not ok]
+        if self.postgres_configured:
+            missing = [name for name in missing if not name.startswith("UPSTASH_")]
+        return missing
 
     def dashboard_missing(self) -> list[str]:
         """Settings the web dashboard cannot run without (Redis may fall back to memory)."""

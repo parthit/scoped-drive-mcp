@@ -1,7 +1,8 @@
 """Scope guard: every file the server touches must be allowlisted or live under an
 allowlisted folder.
 
-The allowlist is what the owner ticked in the dashboard, plus ROOT_FOLDER_ID if set.
+The allowlist is what that person ticked in the dashboard. ROOT_FOLDER_ID is added
+only for the admin (and for an unset actor, which single-tenant tests use).
 
 Rules:
 - A file is in scope if its own id is allowlisted, or if walking up its `parents`
@@ -34,6 +35,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .auth import current_actor
 from .drive_client import FOLDER_MIME, DriveClient, DriveNotFoundError
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
@@ -126,6 +128,7 @@ class ScopeGuard:
         *,
         allowlist: AllowlistSource | None = None,
         allowlist_ttl: float = 2.0,
+        admin_email: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         max_depth: int = 64,
         max_lookups: int = 256,
@@ -138,6 +141,7 @@ class ScopeGuard:
         self.ttl = ttl
         self.allowlist_source = allowlist
         self.allowlist_ttl = allowlist_ttl
+        self.admin_email = admin_email
         self._clock = clock
         self.max_depth = max_depth
         self.max_lookups = max_lookups
@@ -145,36 +149,64 @@ class ScopeGuard:
         self.parents_chunk_size = parents_chunk_size
         self.max_individual_files = max_individual_files
         self._lock = threading.Lock()
-        self._ancestors: dict[str, tuple[float, FileRef | None]] = {}
-        self._folders: tuple[float, frozenset[str], tuple[str, ...]] | None = None
-        self._allowed: tuple[float, dict[str, str]] | None = None
+        # Caches are partitioned by the actor email. An unset actor shares one cache so
+        # single-tenant tests keep their current behavior. User A's allowlist must not
+        # satisfy user B's scope check.
+        self._ancestors: dict[str, dict[str, tuple[float, FileRef | None]]] = {}
+        self._folders: dict[str, tuple[float, frozenset[str], tuple[str, ...]]] = {}
+        self._allowed: dict[str, tuple[float, dict[str, str]]] = {}
+
+    def _who(self) -> str:
+        return current_actor.get() or ""
 
     # ---- allowlist -----------------------------------------------------
 
+    def _root_for_actor(self) -> str | None:
+        """The deployment root, only for the admin.
+
+        `ROOT_FOLDER_ID` is an extra folder on the admin's Drive. Other tenants must
+        not inherit it. An unset actor is the admin (single-tenant tests and calls
+        that have not entered the middleware). When no admin email was given, the
+        root stays in scope so those tests keep working.
+        """
+        if not self.root_id:
+            return None
+        if self.admin_email is None:
+            return self.root_id
+        who = self._who()
+        if not who or who == self.admin_email:
+            return self.root_id
+        return None
+
     def allowed(self) -> dict[str, str]:
-        """Allowlisted id -> mime type (ROOT_FOLDER_ID included), cached for `allowlist_ttl`."""
+        """Allowlisted id -> mime type, plus the admin's ROOT_FOLDER_ID, cached."""
+        who = self._who()
         now = self._clock()
         with self._lock:
-            if self._allowed is not None and self._allowed[0] > now:
-                return self._allowed[1]
+            cached = self._allowed.get(who)
+            if cached is not None and cached[0] > now:
+                return cached[1]
         items: dict[str, str] = {}
         if self.allowlist_source is not None:
             items.update(self.allowlist_source())
-        if self.root_id:
-            items[self.root_id] = FOLDER_MIME
+        root = self._root_for_actor()
+        if root:
+            items[root] = FOLDER_MIME
         with self._lock:
-            self._allowed = (now + self.allowlist_ttl, items)
+            self._allowed[who] = (now + self.allowlist_ttl, items)
         return items
 
     def invalidate_allowlist(self) -> None:
+        who = self._who()
         with self._lock:
-            self._allowed = None
-            self._folders = None
+            self._allowed.pop(who, None)
+            self._folders.pop(who, None)
 
     def default_parent(self) -> str | None:
-        """Where creates go without a parent_id: ROOT_FOLDER_ID, else the only allowed folder."""
-        if self.root_id:
-            return self.root_id
+        """Where creates go without a parent_id: the admin's root, else the only folder."""
+        root = self._root_for_actor()
+        if root:
+            return root
         folders = [fid for fid, mime in self.allowed().items() if mime == FOLDER_MIME]
         return folders[0] if len(folders) == 1 else None
 
@@ -188,27 +220,31 @@ class ScopeGuard:
         return FileRef.from_api(data)
 
     def _ancestor(self, folder_id: str) -> FileRef | None:
+        who = self._who()
         now = self._clock()
         with self._lock:
-            cached = self._ancestors.get(folder_id)
+            cached = self._ancestors.get(who, {}).get(folder_id)
             if cached is not None and cached[0] > now:
                 return cached[1]
         ref = self._fetch(folder_id)
         with self._lock:
-            self._ancestors[folder_id] = (now + self.ttl, ref)
+            self._ancestors.setdefault(who, {})[folder_id] = (now + self.ttl, ref)
         return ref
 
     def remember(self, ref: FileRef) -> None:
         """Seed the ancestor cache with a folder we just saw from Drive."""
         if ref.is_folder:
             with self._lock:
-                self._ancestors[ref.id] = (self._clock() + self.ttl, ref)
+                bucket = self._ancestors.setdefault(self._who(), {})
+                bucket[ref.id] = (self._clock() + self.ttl, ref)
 
     def invalidate(self, file_id: str | None = None) -> None:
+        who = self._who()
         with self._lock:
-            if file_id is not None:
-                self._ancestors.pop(file_id, None)
-            self._folders = None
+            bucket = self._ancestors.get(who)
+            if file_id is not None and bucket is not None:
+                bucket.pop(file_id, None)
+            self._folders.pop(who, None)
 
     def resolve(self, file_id: str) -> FileRef:
         """Fetch a file fresh (never cached). Missing files are reported as out of scope."""
@@ -316,13 +352,15 @@ class ScopeGuard:
 
     def folders_in_scope(self) -> tuple[str, ...]:
         """All non-trashed folders under allowlisted folders (included), BFS, cached for `ttl`."""
+        who = self._who()
         allowed = self.allowed()
         roots = [fid for fid, mime in allowed.items() if mime in (FOLDER_MIME, "")]
         key = frozenset(roots)
         now = self._clock()
         with self._lock:
-            if self._folders is not None and self._folders[0] > now and self._folders[1] == key:
-                return self._folders[2]
+            cached = self._folders.get(who)
+            if cached is not None and cached[0] > now and cached[1] == key:
+                return cached[2]
 
         live_roots: list[str] = []
         for fid in roots:
@@ -365,7 +403,7 @@ class ScopeGuard:
 
         folders = tuple(seen)
         with self._lock:
-            self._folders = (now + self.ttl, key, folders)
+            self._folders[who] = (now + self.ttl, key, folders)
         return folders
 
     def individual_files(self) -> set[str]:

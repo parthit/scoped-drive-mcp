@@ -21,7 +21,30 @@ Access is limited twice:
    an allowlisted folder, before anything is sent to Google.
 
 The first wall needs a second Google account. You can skip it (see [Two modes](#two-modes-separate-bot-or-same-account)),
-but a separate bot is recommended.
+but a separate bot is recommended. Same-account mode is only for the admin (`OWNER_EMAIL`).
+
+## More than one person
+
+Each person is a tenant with two Google accounts: the one they sign in to the dashboard with, and a
+second Gmail they created as their bot. Ticking an item shares it with **their** bot and adds it to
+**their** allowlist. Grok Bot connects with the MCP OAuth flow already on `/oauth/authorize`; that
+grant is tied to the signed-in user, and `/mcp` calls Drive with that user's bot. One Grok Bot does
+not see another person's files.
+
+`OWNER_EMAIL` is the admin. That account keeps its own ticks, its own bot, and its own Grok Bot
+connection, and it is the only account that can open `/admin` (a directory of emails, bot addresses,
+and whether Grok Bot is connected — not files). Pre-shared `API_TOKENS` from `scripts/make_token.py`
+stay a legacy bearer for the admin only. New people do not get those tokens; they sign in and click
+Allow in Grok Bot.
+
+`BOT_EMAIL` is the admin's bot address, not a template for anyone else. If it is unset or equal to
+`OWNER_EMAIL`, only the admin stays in same-account mode.
+
+Storage is still Upstash Redis when that is all that is configured, and tests use in-memory keys.
+Set `DATABASE_URL` or `POSTGRES_URL` (Vercel Neon injects a pooled URL) to store the same data in
+Postgres. If both Redis and Postgres are set, the admin's existing allowlist, tokens, requests and
+activity are copied across once. `/health` reports `store` as `memory`, `redis` or `postgres` and
+never prints the URL.
 
 New here? Follow the [Phase 2 setup and test walkthrough](#phase-2-setup-and-test-walkthrough). The older
 single-folder setup (phase 1) still works and is described further down. See [docs/PLAN.md](docs/PLAN.md) for
@@ -135,12 +158,13 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `API_TOKENS` | yes | step 6 (`scripts/make_token.py`) |
 | `GOOGLE_OAUTH_CLIENT_ID` | yes | step 1.4 |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | step 1.4 |
-| `OWNER_EMAIL` | yes | your own Google address (the only account that can sign in) |
+| `OWNER_EMAIL` | yes | the admin's Google address (the only account that can open `/admin`; other people can sign in too) |
 | `BOT_EMAIL` | recommended | the bot Gmail address; leave empty for [same-account mode](#two-modes-separate-bot-or-same-account) |
 | `APP_BASE_URL` | yes | your Vercel domain, e.g. `https://scoped-drive-mcp.vercel.app` (no trailing `/`) |
 | `SESSION_SECRET` | yes | step 2.3 |
 | `ENCRYPTION_KEY` | yes | step 2.3 |
-| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | yes | added by the Upstash integration (or `KV_REST_API_URL` / `KV_REST_API_TOKEN`); on Vercel the app refuses to start without them |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | one store | added by the Upstash integration (or `KV_REST_API_URL` / `KV_REST_API_TOKEN`). On Vercel the app needs Redis **or** Postgres |
+| `DATABASE_URL` or `POSTGRES_URL` | one store | optional Neon Postgres URL. If both Redis and Postgres are set, Redis is copied once and Postgres is then used |
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | no | only for the phase-1 script route; if set it overrides `/connect-bot` |
 | `ROOT_FOLDER_ID` | no | a folder that is always allowed in addition to your ticks |
 | `MAX_BYTES`, `MAX_CHARS`, `SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL` | no | limits; defaults 5 MB, 100000, 60 s, 2 s |

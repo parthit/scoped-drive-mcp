@@ -188,6 +188,8 @@ def no_redis_env(monkeypatch):
         "KV_REST_API_TOKEN",
         "REDIS_REST_URL",
         "REDIS_REST_TOKEN",
+        "DATABASE_URL",
+        "POSTGRES_URL",
     ):
         monkeypatch.delenv(name, raising=False)
 

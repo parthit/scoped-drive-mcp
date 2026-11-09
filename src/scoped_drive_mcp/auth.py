@@ -28,9 +28,15 @@ from .config import Role, TokenEntry
 class Principal:
     token_name: str
     role: Role
+    # The dashboard user this caller acts for. API tokens leave this empty; the
+    # middleware fills in the admin. OAuth grants set the user who approved them.
+    email: str | None = None
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)
+# Which tenant's allowlist, vault and Drive client the current call uses.
+# Unset means the admin's legacy keys (single-tenant tests and /health).
+current_actor: ContextVar[str | None] = ContextVar("current_actor", default=None)
 
 OAuthResolver = Callable[[str], Principal | None]
 
@@ -79,12 +85,14 @@ class BearerAuthMiddleware:
         exempt_paths: Iterable[str] = ("/health",),
         oauth_resolve: OAuthResolver | None = None,
         resource_metadata: str | None = None,
+        owner_email: str | None = None,
     ):
         self.app = app
         self.tokens = tuple(tokens)
         self.exempt_paths = frozenset(exempt_paths)
         self.oauth_resolve = oauth_resolve
         self.resource_metadata = resource_metadata
+        self.owner_email = owner_email
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in self.exempt_paths:
@@ -106,11 +114,18 @@ class BearerAuthMiddleware:
             audit_auth_failure(reason, scope.get("path", ""))
             await _unauthorized(send, reason, self.resource_metadata)
             return
+        # Pre-shared API tokens are the admin's legacy bearer. OAuth already set email.
+        if principal.email is None and self.owner_email:
+            principal = Principal(
+                token_name=principal.token_name, role=principal.role, email=self.owner_email
+            )
 
         reset = current_principal.set(principal)
+        reset_actor = current_actor.set(principal.email)
         try:
             await self.app(scope, receive, send)
         finally:
+            current_actor.reset(reset_actor)
             current_principal.reset(reset)
 
 

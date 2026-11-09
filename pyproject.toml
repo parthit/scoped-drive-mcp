@@ -17,6 +17,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "python-multipart>=0.0.33",
     "cryptography>=50.0.2",
+    "psycopg[binary]>=3.2,<4",
 ]
 
 [dependency-groups]

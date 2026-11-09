@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Directory{% endblock %}
+{% block content %}
+<h1>People</h1>
+<p class="muted">Everyone who has signed in. This page lists accounts only: not their files,
+  requests, or activity.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Email</th>
+      <th>First signed in</th>
+      <th>Bot Gmail</th>
+      <th>Grok Bot</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for person in people %}
+  <tr>
+    <td>{{ person.email }}</td>
+    <td class="muted">{{ person.created_at or "unknown" }}</td>
+    <td>
+      {% if person.bot_connected %}
+      <span class="pill ok">connected</span> {{ person.bot_email }}
+      {% else %}
+      <span class="pill bad">not connected</span>
+      {% endif %}
+    </td>
+    <td>
+      {% if person.grants %}
+      {% for grant in person.grants %}
+      <div>
+        <span class="pill ok">connected</span> {{ grant.client_name }}
+        <span class="muted">since {{ grant.created_at }}, last used {{ grant.last_used or "never" }}</span>
+      </div>
+      {% endfor %}
+      {% else %}
+      <span class="pill bad">not connected</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">No one has signed in yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

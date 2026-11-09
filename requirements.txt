@@ -89,6 +89,10 @@ protobuf==7.36.2
     #   google-api-core
     #   googleapis-common-protos
     #   proto-plus
+psycopg==3.3.8
+    # via scoped-drive-mcp
+psycopg-binary==3.3.8 ; implementation_name != 'pypy'
+    # via psycopg
 pyasn1==0.6.5
     # via pyasn1-modules
 pyasn1-modules==0.4.2
@@ -143,6 +147,7 @@ typing-extensions==4.16.0
     #   anyio
     #   mcp
     #   opentelemetry-api
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   pydantic-settings
@@ -154,6 +159,8 @@ typing-inspection==0.4.4
     #   mcp
     #   pydantic
     #   pydantic-settings
+tzdata==2026.6 ; sys_platform == 'win32'
+    # via psycopg
 upstash-redis==1.9.0
     # via scoped-drive-mcp
 uritemplate==4.2.0

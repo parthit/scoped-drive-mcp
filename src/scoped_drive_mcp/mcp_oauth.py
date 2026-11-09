@@ -8,7 +8,7 @@ and never looked up here.
 
 Only hashes of authorization codes, access tokens and refresh tokens are stored.
 Redirect URIs are an exact allow list (no open redirects). Issued access tokens
-act as the owner with role admin on `/mcp` only.
+act with role admin on `/mcp` only, and only on the Drive of the person who approved.
 """
 
 import base64
@@ -20,7 +20,7 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -306,12 +306,30 @@ def _bounce_key(digest: str) -> str:
 
 
 class McpOAuth:
-    def __init__(self, store: KeyValueStore, base_url: str, owner_email: str | None):
+    def __init__(
+        self,
+        store: KeyValueStore,
+        base_url: str,
+        owner_email: str | None,
+        signed_in: Callable[[str], bool] | None = None,
+    ):
         self.store = store
         self.base_url = base_url.rstrip("/")
         self.owner_email = owner_email
+        # A person may approve, finish, exchange and refresh only after they have
+        # signed in (a stored owner refresh token). A forged session with no token
+        # still fails. `signed_in` is optional so a caller can keep the old
+        # owner-only check.
+        self.signed_in = signed_in
         self.resource = resource_identifier(self.base_url)
         self.metadata_url = protected_resource_metadata_url(self.base_url)
+
+    def _may_act(self, email: str | None) -> bool:
+        if not email:
+            return False
+        if self.signed_in is not None:
+            return self.signed_in(email)
+        return bool(self.owner_email and email == self.owner_email)
 
     def redirect_allowed(self, uri: str) -> bool:
         if not uri or any(ch in uri for ch in ("\r", "\n", "\t", " ", "\\")):
@@ -327,7 +345,7 @@ class McpOAuth:
 
     def park_completion(self, url: str, email: str) -> str:
         """Store a one-time same-origin handoff. The authorization code stays server-side."""
-        if not self.owner_email or email != self.owner_email or not self.completion_url_ok(url):
+        if not self._may_act(email) or not self.completion_url_ok(url):
             raise AuthorizeError("invalid_request", "That redirect URL is not allowed.")
         ticket = secrets.token_urlsafe(32)
         payload = json.dumps({"url": url, "email": email}, separators=(",", ":"))
@@ -335,7 +353,7 @@ class McpOAuth:
         return ticket
 
     def take_completion(self, ticket: str, email: str | None) -> str | None:
-        if not self.owner_email or not email or email != self.owner_email:
+        if not self._may_act(email):
             return None
         if not ticket or len(ticket) > 200:
             return None
@@ -598,7 +616,7 @@ class McpOAuth:
         return _with_query(exc.redirect_uri, params)
 
     def approve(self, email: str, pending: AuthorizeRequest) -> str:
-        if not self.owner_email or email != self.owner_email:
+        if not self._may_act(email):
             raise AuthorizeError("access_denied", "This account cannot approve connections.")
         # Re-check the client and redirect before sending the browser anywhere.
         self.parse_authorize(QueryMapping(pending.to_dict()))
@@ -664,7 +682,7 @@ class McpOAuth:
         except ValueError:
             raise TokenError("invalid_grant", "code is invalid or expired") from None
         grant = self._grant(str(saved.get("grant_id", "")))
-        if grant is None or grant.email != self.owner_email:
+        if grant is None or not self._may_act(grant.email):
             raise TokenError("invalid_grant", "code is invalid or expired")
         grant.code_hash = None
         self._save_grant(grant)
@@ -701,7 +719,7 @@ class McpOAuth:
         grant = self._grant(str(saved.get("grant_id", "")))
         if (
             grant is None
-            or grant.email != self.owner_email
+            or not self._may_act(grant.email)
             or not _same(grant.client_id, client.client_id)
             or grant.refresh_hash is None
             or not _same(grant.refresh_hash, digest)
@@ -765,7 +783,7 @@ class McpOAuth:
 
     def resolve_access(self, token: str) -> Principal | None:
         """Map an OAuth access token to an admin principal. Not used for API_TOKENS."""
-        if not self.owner_email or not token:
+        if not token:
             return None
         digest = hash_token(token)
         raw = self.store.get(_at_key(digest))
@@ -778,7 +796,7 @@ class McpOAuth:
             return None
         if (
             grant is None
-            or grant.email != self.owner_email
+            or not self._may_act(grant.email)
             or digest not in grant.access_hashes
             or not _same(str(saved.get("client_id", "")), grant.client_id)
         ):
@@ -786,7 +804,9 @@ class McpOAuth:
         # Last-use is a side key. Rewriting the grant here races _issue_tokens and can
         # drop a refresh hash or access hash that was saved in between.
         self._note_use(grant.id)
-        return Principal(token_name=_principal_name(grant.client_name), role=Role.ADMIN)
+        return Principal(
+            token_name=_principal_name(grant.client_name), role=Role.ADMIN, email=grant.email
+        )
 
     def list_grants(self, email: str | None) -> list[GrantView]:
         if not email:
