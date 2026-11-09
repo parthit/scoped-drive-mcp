@@ -146,9 +146,12 @@ export class MemoryStore implements Store {
     return null;
   }
 
-  async updateApproval(row: ApprovalRow): Promise<void> {
-    if (!this.approvals.has(row.approval_id)) throw new Error("approval not found");
-    this.approvals.set(row.approval_id, copy(row));
+  async updateApproval(row: ApprovalRow): Promise<ApprovalRow | null> {
+    const current = this.approvals.get(row.approval_id);
+    if (!current || current.consumed_at) return null;
+    const next: ApprovalRow = { ...current, token: row.token, expires_at: row.expires_at };
+    this.approvals.set(row.approval_id, next);
+    return copy(next);
   }
 
   async consumeApproval(approvalId: string, at: Date): Promise<ApprovalRow | null> {

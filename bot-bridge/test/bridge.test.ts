@@ -261,6 +261,29 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
       expect(must(await app.decideApproval(tokenOf(fresh.links[0]?.approval_url), "approve", BASE)).status).toBe("pending_approval");
     });
 
+    test("a consumed approval cannot be reopened by a stale refresh", async () => {
+      const app = bridge();
+      const { alex, invite } = await joined(app);
+      const token = tokenOf(invite.approval_url);
+      const open = await store.findApprovalByToken(token);
+      expect(open?.consumed_at).toBeNull();
+      must(await app.decideApproval(token, "approve", BASE));
+      const revived = await store.updateApproval({
+        ...open!,
+        token: "ap_revived",
+        consumed_at: null,
+        expires_at: new Date(now.getTime() + DAY),
+      });
+      expect(revived).toBeNull();
+      expect(await store.findApprovalByToken("ap_revived")).toBeNull();
+      const denied = await app.decideApproval(token, "deny", BASE);
+      expect(denied.ok).toBe(false);
+      if (!denied.ok) expect(denied.error).toBe("already_used");
+      const listed = must(await app.listLinks(alex, BASE, { refreshApproval: true }));
+      expect(listed.links[0]?.you_approved).toBe(true);
+      expect(listed.links[0]?.approval_url).toBeUndefined();
+    });
+
     test("reply rejects a thread from another link", async () => {
       const app = bridge();
       const { alex, blair, invite } = await active(app);

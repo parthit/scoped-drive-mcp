@@ -34,7 +34,7 @@ export interface Store {
   insertApproval(row: ApprovalRow): Promise<"ok" | "conflict">;
   findOpenApproval(linkId: string, side: Side): Promise<ApprovalRow | null>;
   findApprovalByToken(token: string): Promise<ApprovalRow | null>;
-  updateApproval(row: ApprovalRow): Promise<void>;
+  updateApproval(row: ApprovalRow): Promise<ApprovalRow | null>;
   consumeApproval(approvalId: string, at: Date): Promise<ApprovalRow | null>;
 
   insertManageToken(row: ManageRow): Promise<"ok" | "exists">;

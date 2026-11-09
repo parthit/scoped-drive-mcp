@@ -183,11 +183,15 @@ export class PgStore implements Store {
     return rows[0] ? mapApproval(rows[0]) : null;
   }
 
-  async updateApproval(row: ApprovalRow): Promise<void> {
-    await this.db.query(
-      `UPDATE approvals SET token = $2, expires_at = $3, consumed_at = $4 WHERE approval_id = $1`,
-      [row.approval_id, row.token, row.expires_at, row.consumed_at],
+  async updateApproval(row: ApprovalRow): Promise<ApprovalRow | null> {
+    const rows = await this.db.query<Raw>(
+      `UPDATE approvals
+       SET token = $2, expires_at = $3
+       WHERE approval_id = $1 AND consumed_at IS NULL
+       RETURNING *`,
+      [row.approval_id, row.token, row.expires_at],
     );
+    return rows[0] ? mapApproval(rows[0]) : null;
   }
 
   async consumeApproval(approvalId: string, at: Date): Promise<ApprovalRow | null> {

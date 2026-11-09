@@ -14,7 +14,7 @@ import {
   registeredPage,
 } from "./pages.js";
 import { PLAYBOOK } from "./playbook.js";
-import { safeEqual } from "./ids.js";
+import { newId, safeEqual, sha256 } from "./ids.js";
 import { limitsFromEnv, type Limits } from "./limits.js";
 import { createDefaultStore, type Store } from "./store/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -36,7 +36,6 @@ export function createApp(deps: AppDeps): Hono {
   const auditToken = deps.auditToken !== undefined ? deps.auditToken : process.env.AUDIT_TOKEN?.trim() || null;
   const sweepToken = deps.sweepToken !== undefined ? deps.sweepToken : process.env.SWEEP_TOKEN?.trim() || null;
   const registerPerHour = deps.registerPerHour ?? 30;
-  const registrations = new Map<string, number[]>();
   const app = new Hono();
 
   app.use("*", async (c, next) => {
@@ -73,7 +72,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get("/register", (c) => html(c, registerPage()));
   app.post("/register", async (c) => {
-    if (!allowRegister(registrations, clientIp(c), registerPerHour)) {
+    if (!(await allowRegister(deps.store, clientIp(c), registerPerHour, new Date()))) {
       const message = "Too many registrations from this network. Try again later.";
       if (wantsJson(c)) return c.json({ error: "rate_limited", message }, 429);
       return html(c, registerPage(message), 429);
@@ -267,21 +266,37 @@ export function resolveBaseUrl(requestUrl: string, forced?: string): string {
 }
 
 function clientIp(c: { req: { header: (name: string) => string | undefined } }): string {
+  const real = c.req.header("x-real-ip")?.trim();
+  if (real) return real;
+  const vercel = c.req.header("x-vercel-forwarded-for")?.split(",")[0]?.trim();
+  if (vercel) return vercel;
   const forwarded = c.req.header("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0]?.trim() || "local";
-  return c.req.header("x-real-ip") || "local";
+  if (forwarded) {
+    const parts = forwarded.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
+    const platform = parts[parts.length - 1];
+    if (platform) return platform;
+  }
+  return "local";
 }
 
-function allowRegister(bucket: Map<string, number[]>, ip: string, limit: number): boolean {
-  const now = Date.now();
-  const recent = (bucket.get(ip) ?? []).filter((stamp) => now - stamp < 60 * 60 * 1000);
-  if (recent.length >= limit) {
-    bucket.set(ip, recent);
-    return false;
-  }
-  recent.push(now);
-  bucket.set(ip, recent);
-  return true;
+const REGISTER_WINDOW_MS = 60 * 60 * 1000;
+
+async function allowRegister(store: Store, ip: string, limit: number, now: Date): Promise<boolean> {
+  const actor = `register:${sha256(ip)}`;
+  return store.transaction(async (tx) => {
+    const since = new Date(now.getTime() - REGISTER_WINDOW_MS);
+    const count = await tx.countAuditsSince(actor, ["register"], since);
+    if (count >= limit) return false;
+    await tx.insertAudit({
+      event_id: newId("aud"),
+      actor,
+      action: "register",
+      link_id: null,
+      meta_json: {},
+      created_at: now,
+    });
+    return true;
+  });
 }
 
 async function readObject(c: { req: { header: (name: string) => string | undefined; json: () => Promise<unknown>; parseBody: () => Promise<Record<string, unknown>> } }): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; message: string }> {

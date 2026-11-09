@@ -7,6 +7,7 @@ import {
   SCOPE,
   peerId,
   sideOf,
+  type ApprovalRow,
   type BotRow,
   type LinkRow,
   type LinkStatus,
@@ -151,6 +152,8 @@ export class Bridge {
     const links = await this.store.transaction(async (tx) => {
       const rows = await tx.listLinksForBot(bot.bot_id);
       const filtered = input.status ? rows.filter((link) => link.status === input.status) : rows;
+      const lockOrder = [...new Set(filtered.map((link) => link.link_id))].sort();
+      for (const linkId of lockOrder) await tx.lockLink(linkId);
       const presented = [];
       for (const link of filtered) {
         presented.push(await this.presentLink(tx, link, bot, baseUrl, input.refreshApproval ?? false));
@@ -619,6 +622,9 @@ export class Bridge {
   }
 
   private async presentLink(tx: Store, link: LinkRow, bot: BotRow, baseUrl: string, refreshApproval: boolean): Promise<PublicLink> {
+    const locked = await tx.lockLink(link.link_id);
+    if (!locked) throw new Error("presentLink called for a missing link");
+    link = locked;
     const side = sideOf(link, bot.bot_id);
     if (!side) throw new Error("presentLink called for a bot that is not on the link");
     const youApproved = side === "a" ? link.approved_a_at != null : link.approved_b_at != null;
@@ -628,7 +634,7 @@ export class Bridge {
     let approvalUrl: string | undefined;
     if (!youApproved && link.status !== "revoked") {
       const approval = await this.ensureApproval(tx, link, side, bot.user_id, refreshApproval);
-      approvalUrl = `${trimBase(baseUrl)}/approve/${approval.token}`;
+      if (approval) approvalUrl = `${trimBase(baseUrl)}/approve/${approval.token}`;
     }
     const showInvite = link.status === "awaiting_peer" || link.status === "pending_approval";
     return {
@@ -647,19 +653,28 @@ export class Bridge {
     };
   }
 
-  private async ensureApproval(tx: Store, link: LinkRow, side: Side, userId: string, refresh: boolean) {
-    const open = await tx.findOpenApproval(link.link_id, side);
+  private async ensureApproval(tx: Store, link: LinkRow, side: Side, userId: string, refresh: boolean): Promise<ApprovalRow | null> {
+    const locked = await tx.lockLink(link.link_id);
+    if (!locked || locked.status === "revoked") return null;
+    if (side === "a" ? locked.approved_a_at != null : locked.approved_b_at != null) return null;
+    const open = await tx.findOpenApproval(locked.link_id, side);
     const now = this.now();
     if (open && open.expires_at > now && !refresh) return open;
     if (open) {
-      open.token = randomToken("ap_", 24);
-      open.expires_at = new Date(now.getTime() + this.limits.approvalTtlMs);
-      await tx.updateApproval(open);
-      return open;
+      const rotated = await tx.updateApproval({
+        ...open,
+        token: randomToken("ap_", 24),
+        expires_at: new Date(now.getTime() + this.limits.approvalTtlMs),
+        consumed_at: null,
+      });
+      if (rotated) return rotated;
+      const decided = await tx.lockLink(locked.link_id);
+      if (!decided || decided.status === "revoked") return null;
+      if (side === "a" ? decided.approved_a_at != null : decided.approved_b_at != null) return null;
     }
-    const created = {
+    const created: ApprovalRow = {
       approval_id: newId("apr"),
-      link_id: link.link_id,
+      link_id: locked.link_id,
       user_id: userId,
       side,
       token: randomToken("ap_", 24),
@@ -668,9 +683,7 @@ export class Bridge {
     };
     const inserted = await tx.insertApproval(created);
     if (inserted === "ok") return created;
-    const again = await tx.findOpenApproval(link.link_id, side);
-    if (again) return again;
-    throw new Error("could not issue approval");
+    return tx.findOpenApproval(locked.link_id, side);
   }
 
   private async ensureManage(tx: Store, linkId: string, botId: string) {

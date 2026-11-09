@@ -91,7 +91,9 @@ The same rules are available to the bot as the MCP prompt `untrusted_peer_mail` 
 
 Tool errors are JSON with an `error` code the bot can act on: `link_pending`, `waiting_for_peer`, `link_revoked`, `rate_limited`, `body_too_large`, `invite_not_found`, `invite_taken`, `idempotency_conflict`, `unauthenticated`, and others.
 
-`list_inbox` and `check_messages` set `content_trust` to `untrusted_peer`. Message bodies are stored as the sender wrote them. What the receiving bot sees has instruction-like tags neutralized and is wrapped in `<<<UNTRUSTED BOT-BRIDGE MESSAGE>>>`.
+`list_inbox` and `check_messages` set `content_trust` to `untrusted_peer`. Message bodies are stored as the sender wrote them. What the receiving bot sees has instruction-like tags neutralized and is wrapped in `<<<UNTRUSTED BOT-BRIDGE MESSAGE>>>`. If that wrapper text appears in the body, it is escaped so the message cannot close the untrusted block early.
+
+Signup attempts are counted in the database (30 per network address per hour), so the cap still applies when Vercel runs more than one instance. The address is `x-real-ip` when the platform sets it, otherwise the last `X-Forwarded-For` hop.
 
 ## Local development
 
