@@ -14,12 +14,15 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from cryptography.fernet import Fernet, InvalidToken
+
 from .store import KeyValueStore
 
 HOUR = 3600
 DAY = 24 * HOUR
 MESSAGE_TTL = 14 * DAY
 INVITE_TTL = 7 * DAY
+PEER_TTL = 10 * 365 * DAY
 MAX_BODY_BYTES = 2048
 PER_LINK_PER_HOUR = 30
 PER_USER_PER_HOUR = 60
@@ -61,7 +64,10 @@ def neutralize(body: str) -> str:
     def tags(match: re.Match[str]) -> str:
         return match.group(0).replace("<", "‹").replace(">", "›")
 
-    return _INJECTION.sub("[removed-instruction-phrase]", _TAG.sub(tags, body))
+    cleaned = _INJECTION.sub("[removed-instruction-phrase]", _TAG.sub(tags, body))
+    for marker in (UNTRUSTED_START, UNTRUSTED_END):
+        cleaned = cleaned.replace(marker, "[removed-marker]")
+    return cleaned
 
 
 def present_untrusted(body: str) -> str:
@@ -80,11 +86,13 @@ class Mailbox:
         store: KeyValueStore,
         base_url: str = "",
         clock: Any = None,
+        encryption_key: str | None = None,
     ) -> None:
         self.store = store
         self.base_url = base_url.rstrip("/")
         self.clock = clock or time.time
         self._lock = threading.Lock()
+        self._fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
 
     def request_link(self, email: str, invite_code: str | None = None) -> dict[str, Any]:
         you = _email(email)
@@ -315,14 +323,13 @@ class Mailbox:
             self._charge_attempt(you)
             raise MailboxError("invite_not_found", "That invite code does not exist.")
         claim = f"bridge:peer:{link_id}"
-        if not self.store.set_if_absent(claim, you, ex=120):
+        if not self.store.set_if_absent(claim, you, ex=PEER_TTL):
             current = self.store.get(claim)
             if current != you:
                 self._charge_attempt(you)
                 raise MailboxError(
                     "invite_taken", "That invite was already used by another person."
                 )
-        self.store.set(claim, you)
         self.store.hset(f"bridge:user:{you}", link_id, link["created_at"])
         return self._public_link(link, you)
 
@@ -576,11 +583,23 @@ class Mailbox:
             return None
         if not isinstance(data, dict) or self._stamp(str(data.get("expires_at"))) <= self._now():
             return None
+        if data.get("body_enc"):
+            if self._fernet is None:
+                return None
+            try:
+                data["body"] = self._fernet.decrypt(str(data["body"]).encode()).decode()
+            except (InvalidToken, ValueError):
+                return None
+            data.pop("body_enc", None)
         return data
 
     def _save_message(self, message: dict[str, Any]) -> None:
         remaining = int(self._stamp(message["expires_at"]) - self._now())
-        self.store.set(f"bridge:msg:{message['msg_id']}", json.dumps(message), ex=max(remaining, 1))
+        stored = dict(message)
+        if self._fernet is not None:
+            stored["body"] = self._fernet.encrypt(message["body"].encode()).decode()
+            stored["body_enc"] = True
+        self.store.set(f"bridge:msg:{message['msg_id']}", json.dumps(stored), ex=max(remaining, 1))
 
     def _purge(self, link_id: str) -> int:
         deleted = 0

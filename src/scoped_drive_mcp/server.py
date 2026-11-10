@@ -325,13 +325,6 @@ def create_mcp(
         active link are updated."""
         return await _run(run_mail, box.mark_read, msg_ids)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
-    @guarded("revoke_link")
-    async def revoke_link(link_id: str, purge_messages: bool = False) -> dict[str, Any]:
-        """Turn a pairing off. Either person can revoke. Send and receive stop immediately.
-        Set purge_messages true to delete stored messages now."""
-        return await _run(run_mail, box.revoke, link_id, purge=purge_messages)
-
     return mcp
 
 
@@ -534,7 +527,7 @@ def build_app(
         if settings.app_base_url
         else None
     )
-    mailbox = Mailbox(kv, base_url=settings.app_base_url or "")
+    mailbox = Mailbox(kv, base_url=settings.app_base_url or "", encryption_key=enc_key)
     mcp = create_mcp(service, access, mailbox)
 
     if oauth is None and settings.oauth_client_configured and settings.app_base_url:

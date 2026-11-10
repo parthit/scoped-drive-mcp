@@ -33,7 +33,6 @@ VIEWER_TOOLS: frozenset[str] = frozenset(
         "check_messages",
         "reply",
         "mark_read",
-        "revoke_link",
     }
 )
 EDITOR_TOOLS: frozenset[str] = VIEWER_TOOLS | {

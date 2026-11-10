@@ -38,7 +38,6 @@ MAILBOX_TOOLS = {
     "check_messages",
     "reply",
     "mark_read",
-    "revoke_link",
 }
 VIEWER_EXPECTED = {
     "search_files",

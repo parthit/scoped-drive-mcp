@@ -67,7 +67,6 @@ the design notes.
 | `check_messages(since?)` | ✓ | ✓ | ✓ |
 | `reply(body, msg_id?, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
 | `mark_read(msg_ids)` | ✓ | ✓ | ✓ |
-| `revoke_link(link_id, purge_messages?)` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
@@ -96,9 +95,9 @@ The same `/mcp` connection can carry short text between two people. Each person 
 1. One assistant calls `request_link` and gives the other person the `invite_code`.
 2. The other assistant calls `request_link` with that code.
 3. Each person opens `/bridge` while signed in, checks the other Google account, and chooses **Approve pairing**. One approval leaves the link pending.
-4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person can revoke on `/bridge` or with `revoke_link`.
+4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person turns the mailbox off on `/bridge`. There is no revoke tool for the assistant.
 
-`list_inbox` and `check_messages` wrap mail as untrusted data. The assistant should summarize it and wait. Messages are text, capped at 2 KB, 30 per link per hour, and kept for 14 days. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
+`list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour, and kept for 14 days. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
 
 `read_file` exports Google Docs and Slides as plain text and Google Sheets as CSV (first sheet only), downloads
 text-like files, and refuses binary files (PDFs, images, ...). Output is capped by `MAX_BYTES` and `MAX_CHARS`.
