@@ -248,24 +248,14 @@ def flash(request: Request, kind: str, message: str) -> None:
     request.session["flash"] = messages[-5:]
 
 
-def _pending_nav(request: Request) -> int:
-    """Waiting access requests for the signed-in person. Zero when the tenant is not set."""
-    owner = request.session.get("owner")
-    if not isinstance(owner, str) or current_actor.get() != owner:
-        return 0
-    dash = getattr(request.app.state, "dashboard", None)
-    if dash is None:
-        return 0
-    try:
-        return sum(1 for item in dash.requests.recent(100) if item.status == PENDING)
-    except Exception:
-        logger.exception("pending request count failed")
-        return 0
-
-
 def render(request: Request, template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
     owner = request.session.get("owner")
     admin_email = getattr(request.app.state, "owner_email", None)
+    # Callers that already loaded the waiting-request count pass it. Otherwise use the
+    # count stashed for this request. Rendering itself does not read the store.
+    pending_count = ctx.pop("pending_count", None)
+    if pending_count is None:
+        pending_count = getattr(request.state, "pending_count", 0)
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -273,7 +263,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         csrf=_csrf_token(request) if owner else None,
         flashes=request.session.pop("flash", []) if owner else [],
         nav=request.url.path,
-        pending_count=ctx.pop("pending_count", _pending_nav(request)),
+        pending_count=pending_count,
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)
@@ -324,6 +314,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     serializer = URLSafeTimedSerializer(settings.session_secret.get_secret_value(), STATE_SALT)
     app_origin = origin_of(settings.app_base_url)
 
+    async def remember_pending(request: Request) -> None:
+        """One waiting-request count for this page, off the event loop. The nav reads it."""
+        try:
+            request.state.pending_count = await blocking(ctx.requests.pending_count)
+        except Exception:
+            logger.exception("pending request count failed")
+            request.state.pending_count = 0
+
     def session_user(request: Request) -> str | None:
         """Signed-in email, only if that tenant still has a stored owner refresh token."""
         owner = request.session.get("owner")
@@ -345,6 +343,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
             reset = current_actor.set(email)
             try:
+                await remember_pending(request)
                 return await handler(request)
             except OwnerNotConnectedError:
                 request.session.clear()
@@ -572,6 +571,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render_plain("home.html")
         reset = current_actor.set(email)
         try:
+            await remember_pending(request)
             return await overview(request)
         finally:
             current_actor.reset(reset)
@@ -579,14 +579,12 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def overview(request: Request) -> Response:
         def gather() -> dict[str, Any]:
             entries = ctx.allowlist.entries()
-            reqs = ctx.requests.recent(100)
             bot = ctx.bot_status()
             return {
                 "bot": bot,
                 "owner_connected": ctx.owner_connected(),
                 "unshared_count": len(ctx.grants().unshared()) if bot["connected"] else 0,
                 "allow_count": len(entries),
-                "pending_count": sum(1 for r in reqs if r.status == PENDING),
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
                 ),
@@ -820,6 +818,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="Page not found.")
         reset = current_actor.set(email)
         try:
+            await remember_pending(request)
             people = await blocking(_directory_rows)
         finally:
             current_actor.reset(reset)
@@ -905,13 +904,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 target += "?" + request.url.query
             return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
         request.session["mcp_auth"] = pending.to_dict()
-        return render(
-            request,
-            "consent.html",
-            client_name=pending.client_name,
-            scope=SCOPE,
-            requested_scope=pending.requested_scope,
-        )
+        reset = current_actor.set(signed_in)
+        try:
+            await remember_pending(request)
+            return render(
+                request,
+                "consent.html",
+                client_name=pending.client_name,
+                scope=SCOPE,
+                requested_scope=pending.requested_scope,
+            )
+        finally:
+            current_actor.reset(reset)
 
     async def oauth_decide(request: Request, form: dict[str, str]) -> Response:
         if ctx.mcp_oauth is None:

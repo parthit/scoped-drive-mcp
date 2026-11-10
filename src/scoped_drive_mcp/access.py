@@ -6,6 +6,7 @@ Storage (all keys expire after 7 days):
 - `req:<id>`           the request as JSON
 - `req:pending:<file>` id of the pending request for that file (dedupe)
 - `requests:index`     newest-first list of request ids (capped)
+- `requests:pending`   ids that are still pending, so the nav count is not a scan of the history
 """
 
 import json
@@ -19,6 +20,8 @@ from .store import KeyValueStore, utc_now
 
 REQUEST_TTL = 7 * 24 * 3600
 INDEX_KEY = "requests:index"
+PENDING_INDEX = "requests:pending"
+PENDING_READY = "requests:pending_ready"
 INDEX_MAX = 300
 MAX_TEXT = 500
 
@@ -137,6 +140,7 @@ class AccessRequests:
             self.store.set(f"req:pending:{file_id}", req.id, ex=REQUEST_TTL)
         self.store.lpush(INDEX_KEY, req.id)
         self.store.ltrim(INDEX_KEY, 0, INDEX_MAX - 1)
+        self.store.lpush(PENDING_INDEX, req.id)
         return req, True
 
     def decide(
@@ -154,7 +158,34 @@ class AccessRequests:
         self.save(req)
         if req.file_id is not None and self.store.get(f"req:pending:{req.file_id}") == req.id:
             self.store.delete(f"req:pending:{req.file_id}")
+        if status != PENDING:
+            self.store.lrem(PENDING_INDEX, req.id)
         return req
+
+    def pending_count(self) -> int:
+        """How many requests are still waiting. One list read, then one read per waiting id.
+
+        The history list is walked once per tenant, the first time this is asked, so requests
+        saved before the waiting list existed are not dropped. Later calls do not walk it.
+        """
+        if self.store.get(PENDING_READY) is None:
+            seen = set(self.store.lrange(PENDING_INDEX, 0, -1))
+            for req in self.recent(100):
+                if req.status == PENDING and req.id not in seen:
+                    self.store.lpush(PENDING_INDEX, req.id)
+            self.store.set(PENDING_READY, "1")
+        count = 0
+        seen_ids: set[str] = set()
+        for rid in self.store.lrange(PENDING_INDEX, 0, -1):
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            req = self.get(rid)
+            if req is None or req.status != PENDING:
+                self.store.lrem(PENDING_INDEX, rid)
+                continue
+            count += 1
+        return count
 
     def recent(self, limit: int = 100) -> list[AccessRequest]:
         out: list[AccessRequest] = []

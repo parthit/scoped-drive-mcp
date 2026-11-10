@@ -279,6 +279,43 @@ def test_requests_page_lists_pending_and_decided(c) -> None:
     assert page.count('class="pill pending"') == 2 and page.count('class="pill bad"') == 1
 
 
+def test_pending_count_reads_waiting_ids_not_the_history() -> None:
+    reqs = AccessRequests(MemoryStore())
+    for i in range(15):
+        req, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id=f"f{i}")
+        reqs.decide(req, "denied")
+    live, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id="live")
+    assert reqs.pending_count() == 1
+
+    reads: list[str] = []
+    original = reqs.store.get
+
+    def spy(key: str) -> str | None:
+        reads.append(key)
+        return original(key)
+
+    reqs.store.get = spy
+    assert reqs.pending_count() == 1
+    assert [key for key in reads if key.startswith("req:")] == [f"req:{live.id}"]
+
+    reqs.store.get = original
+    reqs.decide(reqs.get(live.id), "denied")
+    reads.clear()
+    reqs.store.get = spy
+    assert reqs.pending_count() == 0
+    assert not any(key.startswith("req:") for key in reads)
+
+
+def test_pending_count_rebuilds_a_missing_waiting_list() -> None:
+    store = MemoryStore()
+    reqs = AccessRequests(store)
+    req, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id="f1")
+    store.delete("requests:pending")
+    store.delete("requests:pending_ready")
+    assert reqs.pending_count() == 1
+    assert store.lrange("requests:pending", 0, -1) == [req.id]
+
+
 def test_requests_expire_after_7_days() -> None:
     clock = FakeClock()
     reqs = AccessRequests(PrefixedStore(MemoryStore(clock=clock)))
