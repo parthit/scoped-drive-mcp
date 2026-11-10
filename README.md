@@ -240,7 +240,7 @@ The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
 5. Ask the bot to list allowed files. An unticked file should still return an approval link.
 
 Allow grants the same tools as an admin API token, still limited to ticked items. The overview page lists the
-connection under **Connected apps**; **Revoke** disconnects it immediately. The dashboard sign-in cookie is not
+connection under **Connected apps**; **Disconnect** stops it immediately. The dashboard sign-in cookie is not
 a token for `/mcp`.
 
 ### Connect Muse
@@ -251,7 +251,7 @@ Muse (muse.ai) also connects with OAuth and registers itself. Leave any client i
 2. In Muse, add a custom connector for `https://<project>.vercel.app/mcp`.
 3. When the browser opens, sign in and click Allow.
 
-The same **Connected apps** list shows the Muse connection, and **Revoke** disconnects it.
+The same **Connected apps** list shows the Muse connection, and **Disconnect** stops it.
 
 ### 7. Test it
 
@@ -261,9 +261,9 @@ The same **Connected apps** list shows the Muse connection, and **Revoke** disco
 3. **Approve:** open the link (you're signed in as the owner). It shows what was asked, by which token and
    tool, and the reason. Choose **Share just this item** (or its parent folder) and click **Approve**.
 4. **Retry:** ask Grok again. It works now.
-5. **Revoke:** in **Access**, click **Revoke** next to `Private note`. Ask again: Grok gets a new approval link
+5. **Remove:** in **Access**, click **Remove** next to `Private note`. Ask again: Grok gets a new approval link
    instead of the content (the server stops within ~2 seconds). If the item still has a share from an older
-   bot account, revoke removes that share too.
+   bot account, Remove deletes that share too.
    `get_metadata` and `list_folder` only ever list parent folder ids that are themselves shared, so the ids of
    your other folders never reach Grok.
 6. **Activity** shows every call, grant, revoke and decision (no file contents).

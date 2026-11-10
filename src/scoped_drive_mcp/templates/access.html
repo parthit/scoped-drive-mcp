@@ -4,15 +4,14 @@
 <h1>What the assistant can use</h1>
 {% include "_mode.html" %}
 <p class="muted">Each item below is on your list. Folders include everything inside them.
-  Remove takes the item off that list. If it was shared with an older bot account, that
-  Drive share is removed too.</p>
+  Remove takes the item off that list.</p>
 {% if not bot.connected %}
 <div class="warn">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
   Sign out and sign in again.</div>
 {% endif %}
 <div class="scroll-x">
 <table>
-  <thead><tr><th>Name</th><th>Type</th><th>Granted</th><th>Via</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>Type</th><th>Added</th><th>From</th><th></th></tr></thead>
   <tbody>
   {% if root_folder_id %}
   <tr>

@@ -10,17 +10,14 @@
 <div class="grid">
   <div class="card stat"><span class="muted">Allowed items</span><b>{{ allow_count }}</b><a href="/access">Manage</a></div>
   <div class="card stat"><span class="muted">Pending requests</span><b>{{ pending_count }}</b><a href="/requests">Review</a></div>
-  <div class="card stat"><span class="muted">Assistant acts as</span>
+  <div class="card stat"><span class="muted">Your Google account</span>
     <b style="font-size:16px">{% if bot.connected %}<span class="pill ok">connected</span>{% else %}<span class="pill bad">not connected</span>{% endif %}</b>
-    <span class="muted">{{ bot.email or "" }} (your account)</span></div>
-  <div class="card stat"><span class="muted">Your account</span>
-    <b style="font-size:16px">{% if owner_connected %}<span class="pill ok">connected</span>{% else %}<span class="pill bad">not connected</span>{% endif %}</b>
     <span class="muted">{{ owner }}</span></div>
 </div>
 
 <h2>Get started</h2>
 <ol class="steps">
-  <li class="done">Signed in as {{ owner }}. The assistant uses this Google account.</li>
+  <li class="done">Signed in as {{ owner }}. Tick folders before you connect an assistant.</li>
   <li{% if allow_count %} class="done"{% endif %}>
     Tick at least one folder. <a href="/browse">Browse your Drive</a>
     {% if allow_count %}<span class="pill ok">{{ allow_count }} allowed</span>{% endif %}
