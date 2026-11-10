@@ -42,6 +42,14 @@ New here? Follow the [Phase 2 setup and test walkthrough](#phase-2-setup-and-tes
 single-folder setup (phase 1) still works and is described further down. See [docs/PLAN.md](docs/PLAN.md) for
 the design notes.
 
+## Bot Bridge
+
+This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server that lets
+two people's bots exchange short text messages after both humans approve. It has its own `package.json`, tests,
+and Vercel config, and it is deployed as a **separate** Vercel project with Root Directory `bot-bridge` (the
+root `vercel.json` stays the Python app). How to run and test it is in
+[bot-bridge/docs/TESTING.md](bot-bridge/docs/TESTING.md).
+
 ## Tools and roles
 
 | Tool | viewer | editor | admin |
@@ -52,6 +60,13 @@ the design notes.
 | `read_file(file_id)` | ✓ | ✓ | ✓ |
 | `request_access(description, reason, file_id?)` | ✓ | ✓ | ✓ |
 | `check_access_request(request_id)` | ✓ | ✓ | ✓ |
+| `request_link(invite_code?)` | ✓ | ✓ | ✓ |
+| `list_links()` | ✓ | ✓ | ✓ |
+| `send_message(link_id, body, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
+| `list_inbox(link_id?, unread_only?, limit?, cursor?)` | ✓ | ✓ | ✓ |
+| `check_messages(since?)` | ✓ | ✓ | ✓ |
+| `reply(body, msg_id?, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
+| `mark_read(msg_ids)` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
@@ -72,6 +87,17 @@ When a tool is refused because the item isn't shared (not because of the role), 
 ```
 
 Grok shows you the link; after you approve, it retries (or calls `check_access_request`).
+
+## Mailbox
+
+The same `/mcp` connection can carry short text between two people. Each person is the Google account that already signed in and clicked Allow, so Grok Bot, a grok.com connector, and a Cursor agent or bot that completes this server's OAuth all share that person's mailbox. A second product signed in as you does not get a separate inbox.
+
+1. One assistant calls `request_link` and gives the other person the `invite_code`.
+2. The other assistant calls `request_link` with that code.
+3. Each person opens `/bridge` while signed in, checks the other Google account, and chooses **Approve pairing**. One approval leaves the link pending.
+4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person turns the mailbox off on `/bridge`. There is no revoke tool for the assistant.
+
+`list_inbox` and `check_messages` wrap mail as untrusted data and strip the wrapper's own markers out of the body. The assistant should summarize it and wait. That wrapper is not a boundary from Drive: this is the same connection, so a mailbox message can still ask the assistant to use Drive tools. Messages are text, capped at 2 KB, 30 per link per hour and 60 per account per hour, and kept for 14 days. The inbox list stores a short row per message, so a poll counts live mail in one read and loads only the bodies it shows. Expired and malformed rows are removed in that same read, and purge removes the row, so an old id cannot hide mail that is still live. A `thread_id` belongs to one link, so two pairings can reuse the same id. A retried `idempotency_key` finishes the original send if the first attempt stopped before the message was queued, and it does not count against the hourly cap a second time. When `ENCRYPTION_KEY` is set, bodies are encrypted with that key before they are stored. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
 
 `read_file` exports Google Docs and Slides as plain text and Google Sheets as CSV (first sheet only), downloads
 text-like files, and refuses binary files (PDFs, images, ...). Output is capped by `MAX_BYTES` and `MAX_CHARS`.
@@ -126,6 +152,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `GOOGLE_OAUTH_CLIENT_ID` | yes | step 1.4 |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | step 1.4 |
 | `OWNER_EMAIL` | yes | the admin's Google address (the only account that can open `/admin`; other people can sign in too) |
+| `ALLOWED_EMAILS` | no | comma-separated Google addresses allowed to sign in. Leave unset and any verified Google account can sign in. `OWNER_EMAIL` is always allowed |
 | `APP_BASE_URL` | yes | your Vercel domain, e.g. `https://scoped-drive-mcp.vercel.app` (no trailing `/`) |
 | `SESSION_SECRET` | yes | step 2.3 |
 | `ENCRYPTION_KEY` | yes | step 2.3 |
@@ -156,7 +183,9 @@ Preview deployments are usually behind Vercel's login, so use the production URL
 
 1. Open `https://<project>.vercel.app/` and click **Sign in with Google**. Choose **your own** account, accept
    the unverified-app warning and allow Drive access. The overview should show that account as connected.
-   Grok's tools use this sign-in.
+   Grok's tools use this sign-in. Other people sign in with their own Google accounts and tick their own
+   files. Only `OWNER_EMAIL` can open `/admin`. If `ALLOWED_EMAILS` is set, any address not on that list
+   is rejected.
 
 The refresh token is stored encrypted with `ENCRYPTION_KEY`. (Prefer the old way? Running
 `scripts/bootstrap_oauth.py` and setting `GOOGLE_OAUTH_REFRESH_TOKEN` still works; it needs a Desktop client,
@@ -166,7 +195,7 @@ and you must sign in as yourself, not as a second account.)
 
 1. In your own Google Drive, make a folder `Grok test` with a Google Doc inside (e.g. "Test plan" with a sentence
    in it). Put a second doc **outside** it, e.g. "Private note" in My Drive.
-2. In the dashboard, click **Browse**, find `Grok test` and click **Grant**. It now shows **shared**, and
+2. In the dashboard, click **Browse**, find `Grok test` and click **Allow**. It now shows **allowed**, and
    **Access** lists it. Nothing is shared with another Google account; the folder is only added to the allowlist.
 
 ### 6. Create an API token and connect Grok
@@ -213,6 +242,16 @@ The secret from `make_token.py` stays on the xAI API and the Grok Build CLI.
 Allow grants the same tools as an admin API token, still limited to ticked items. The overview page lists the
 connection under **Connected apps**; **Revoke** disconnects it immediately. The dashboard sign-in cookie is not
 a token for `/mcp`.
+
+### Connect Muse
+
+Muse (muse.ai) also connects with OAuth and registers itself. Leave any client id and secret empty.
+
+1. Finish dashboard sign-in and tick at least one folder.
+2. In Muse, add a custom connector for `https://<project>.vercel.app/mcp`.
+3. When the browser opens, sign in and click Allow.
+
+The same **Connected apps** list shows the Muse connection, and **Revoke** disconnects it.
 
 ### 7. Test it
 
@@ -462,8 +501,10 @@ After changing dependencies, regenerate Vercel's requirements file:
 - **Revoking** removes the allowlist entry first (every server instance re-reads the allowlist at least every
   `ALLOWLIST_CACHE_TTL` seconds, default 2). If the entry still has a permission id from an older bot share,
   that permission is deleted in Drive.
-- **Dashboard sign-in** is Google OAuth (verified email), with a signed, httponly, Secure, SameSite=Lax cookie
-  (8 hours), a CSRF token on every form, a same-origin check, and strict security headers. The MCP bearer
+- **Dashboard sign-in** is Google OAuth for any verified Google account, or only the addresses in
+  `ALLOWED_EMAILS` when that is set (`OWNER_EMAIL` is always allowed). `OWNER_EMAIL` is the admin and the only
+  account that can open `/admin`. The session is a signed, httponly, Secure, SameSite=Lax cookie (8 hours),
+  with a CSRF token on every form, a same-origin check, and strict security headers. The MCP bearer
   tokens don't work on the dashboard, and the dashboard cookie doesn't work on `/mcp`.
 - **Stored secrets:** the sign-in refresh token is encrypted with `ENCRYPTION_KEY` (Fernet) before it goes into
   Redis. Anyone with `ENCRYPTION_KEY` *and* Redis access could use it, so keep both private. The token has full
@@ -472,7 +513,7 @@ After changing dependencies, regenerate Vercel's requirements file:
   so Grok never learns the ids of your other folders.
 - **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a
   session) answer `405` with `Allow: POST` instead of holding the connection open.
-- **Access requests** have 192-bit random IDs, expire after 7 days, and only the owner can open them. A pending
+- **Access requests** have 192-bit random IDs, expire after 7 days, and only the person they belong to can open them. A pending
   request for the same file is reused rather than duplicated.
 - **Sharing is inherited.** Anything placed inside a shared folder, by you or anyone else with access, becomes
   visible to Grok. Moving a file *out* removes access: immediately for the file itself, and within
@@ -498,7 +539,7 @@ After changing dependencies, regenerate Vercel's requirements file:
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection is an admin token on `/mcp` and still cannot pass the allowlist.
   Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
-  Redirect URLs are an exact allow list (Cursor, Grok Bot, and a local test callback).
+  Redirect URLs are an exact allow list (Cursor, Grok Bot, Muse, and a local test callback).
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
@@ -529,6 +570,7 @@ After changing dependencies, regenerate Vercel's requirements file:
 
 ```
 api/index.py                  Vercel entry point (app = build_app())
+bot-bridge/                   separate pairing mailbox; own package, tests, and Vercel project
 vercel.json                   routes everything to api/index.py, maxDuration, bundles templates
 requirements.txt              runtime deps for Vercel (exported from uv.lock)
 scripts/bootstrap_oauth.py    optional: one-time sign-in as yourself → refresh token (phase 1 route)
@@ -540,6 +582,7 @@ src/scoped_drive_mcp/
   scope.py                    the allowlist scope guard and search query builder
   policy.py                   role → tool map and @require decorator (access_required errors)
   access.py                   access requests (storage, dedupe, request tools)
+  bridge.py                   mailbox between two Google accounts on this server
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log
   oauth.py                    Google web OAuth (authorization code) for the dashboard

@@ -218,4 +218,31 @@ describe("http", () => {
     expect((await off.request(`${BASE}/audit`)).status).toBe(404);
     expect((await off.request(`${BASE}/internal/sweep`, { method: "POST" })).status).toBe(404);
   });
+
+  test("registration cap is shared across app instances and ignores a spoofed forwarding prefix", async () => {
+    const store = new MemoryStore();
+    const first = createApp({ store, baseUrl: BASE, registerPerHour: 2 });
+    const second = createApp({ store, baseUrl: BASE, registerPerHour: 2 });
+    const headers = {
+      "content-type": "application/json",
+      accept: "application/json",
+      "x-forwarded-for": "1.2.3.4, 10.0.0.8",
+      "x-real-ip": "203.0.113.10",
+    };
+    const body = JSON.stringify({ display_name: "Alex" });
+    expect((await first.request(`${BASE}/register`, { method: "POST", headers, body })).status).toBe(201);
+    expect((await first.request(`${BASE}/register`, { method: "POST", headers: { ...headers, "x-forwarded-for": "9.9.9.9" }, body })).status).toBe(201);
+    const limited = await second.request(`${BASE}/register`, {
+      method: "POST",
+      headers: { ...headers, "x-forwarded-for": "8.8.8.8" },
+      body,
+    });
+    expect(limited.status).toBe(429);
+    const otherNetwork = await second.request(`${BASE}/register`, {
+      method: "POST",
+      headers: { ...headers, "x-real-ip": "203.0.113.11" },
+      body,
+    });
+    expect(otherNetwork.status).toBe(201);
+  });
 });

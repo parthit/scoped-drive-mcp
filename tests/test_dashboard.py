@@ -386,7 +386,7 @@ def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
     assert r.status_code == 303 and r.headers["location"] == "/browse"
     assert world.files["proj"].permissions == []
     page = owner_c.get("/browse").text
-    assert "Revoke" in page
+    assert "Remove" in page and 'data-confirm="Remove this from the assistant?"' in page
     page = owner_c.get("/browse?folder=proj").text
     assert "via folder" in page and "Everything in this folder is available" in page
     assert "Projects" in owner_c.get("/access").text
@@ -419,6 +419,7 @@ def test_activity_page(owner_c) -> None:
     mcp_call(owner_c, "read_file", file_id="priv-secret")
     page = owner_c.get("/activity").text
     assert "grant" in page and "read_file" in page and "priv-secret" in page
+    assert "Drive id, not a file name" in page
     assert "TOP SECRET" not in page and "payroll" not in page
 
 
@@ -434,6 +435,71 @@ def test_overview_and_health_report_status(owner_c) -> None:
     page = owner_c.get("/").text
     assert "UPSTASH_REDIS_REST_URL" in page
     assert f"{BASE_URL}/mcp" in page
+    assert "uses this Google account" in page
+    assert "make_token.py" in page  # admin-only operator note
+
+
+def test_non_admin_overview_hides_operator_notes(c) -> None:
+    login(c, "eve-code")
+    page = c.get("/").text
+    assert "uses this Google account" in page
+    assert f"{BASE_URL}/mcp" in page
+    assert "make_token.py" not in page
+    assert "UPSTASH_REDIS_REST_URL" not in page
+    assert "Vercel" not in page
+    assert "BOT_EMAIL" not in page
+
+
+def test_allowed_emails_rejects_other_accounts(world, memstore, oauth) -> None:
+    app = build_app(
+        make_settings(
+            root_folder_id=None,
+            allowlist_cache_ttl=0,
+            allowed_emails="owner@example.com",
+        ),
+        world.as_user(OWNER_EMAIL),
+        store=memstore,
+        oauth=oauth,
+        owner_drive_factory=lambda t: world.as_user(OWNER_EMAIL),
+    )
+    c = client(app)
+    refused = login(c, "eve-code")
+    assert refused.status_code == 403
+    assert "not allowed" in refused.text
+    assert oauth.revoked
+    assert c.get("/browse").status_code == 303
+    assert login(c).status_code == 303
+    assert c.get("/browse").status_code == 200
+
+
+def test_requests_nav_counts_pending(owner_c) -> None:
+    mcp_call(owner_c, "read_file", file_id="priv-secret")
+    page = owner_c.get("/browse").text
+    start = page.index("Requests")
+    assert 'class="pill pending">1<' in page[start : start + 160]
+
+
+def test_confirm_script_is_served(c) -> None:
+    r = c.get("/confirm.js")
+    assert r.status_code == 200
+    assert "data-confirm" in r.text
+    assert r.headers["content-type"].startswith("text/javascript")
+
+
+def test_mailbox_empty_state_is_plain_language(owner_c) -> None:
+    page = owner_c.get("/bridge").text
+    assert "request_link" not in page
+    assert "Ask your assistant to start a pairing" in page
+
+
+def test_public_pages_do_not_say_only_the_owner(c) -> None:
+    for path in ("/", "/login", "/privacy", "/terms"):
+        text = c.get(path).text
+        assert "Only the" not in text
+        assert "only the owner" not in text.lower()
+    assert "your own Google account" in c.get("/").text
+    assert "14 days" in c.get("/privacy").text
+    assert "Postgres" in c.get("/privacy").text
 
 
 def test_dashboard_not_configured(world) -> None:

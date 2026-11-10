@@ -33,6 +33,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from .access import PENDING, AccessRequests
 from .audit import audit_owner
 from .auth import current_actor
+from .bridge import MailboxError
 from .config import Settings
 from .drive_client import (
     DRIVE_SCOPE,
@@ -45,7 +46,6 @@ from .drive_client import (
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import OAuthClient, OAuthError
-from .policy import ADMIN_TOOLS
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
 
@@ -104,6 +104,7 @@ class DashboardContext:
     mcp_oauth: McpOAuth | None = None
     directory: Any = None
     drive_router: Any = None
+    mailbox: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -212,6 +213,11 @@ def flash(request: Request, kind: str, message: str) -> None:
 def render(request: Request, template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
     owner = request.session.get("owner")
     admin_email = getattr(request.app.state, "owner_email", None)
+    # Callers that already loaded the waiting-request count pass it. Otherwise use the
+    # count stashed for this request. Rendering itself does not read the store.
+    pending_count = ctx.pop("pending_count", None)
+    if pending_count is None:
+        pending_count = getattr(request.state, "pending_count", 0)
     html = _env.get_template(template).render(
         request=request,
         owner=owner,
@@ -219,6 +225,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         csrf=_csrf_token(request) if owner else None,
         flashes=request.session.pop("flash", []) if owner else [],
         nav=request.url.path,
+        pending_count=pending_count,
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)
@@ -269,6 +276,14 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     serializer = URLSafeTimedSerializer(settings.session_secret.get_secret_value(), STATE_SALT)
     app_origin = origin_of(settings.app_base_url)
 
+    async def remember_pending(request: Request) -> None:
+        """One waiting-request count for this page, off the event loop. The nav reads it."""
+        try:
+            request.state.pending_count = await blocking(ctx.requests.pending_count)
+        except Exception:
+            logger.exception("pending request count failed")
+            request.state.pending_count = 0
+
     def session_user(request: Request) -> str | None:
         """Signed-in email, only if that tenant still has a stored owner refresh token."""
         owner = request.session.get("owner")
@@ -290,6 +305,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
             reset = current_actor.set(email)
             try:
+                await remember_pending(request)
                 return await handler(request)
             except OwnerNotConnectedError:
                 request.session.clear()
@@ -375,7 +391,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         email = str(info.get("email", "")).strip().lower()
         verified = info.get("email_verified") in (True, "true")
-        if not verified:
+        if not verified or not settings.sign_in_allowed(email):
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             audit_owner("login", "deny", reason="wrong_account")
             return render(
@@ -431,6 +447,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render_plain("home.html")
         reset = current_actor.set(email)
         try:
+            await remember_pending(request)
             return await overview(request)
         finally:
             current_actor.reset(reset)
@@ -438,13 +455,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
     async def overview(request: Request) -> Response:
         def gather() -> dict[str, Any]:
             entries = ctx.allowlist.entries()
-            reqs = ctx.requests.recent(100)
             bot = ctx.bot_status()
             return {
                 "bot": bot,
                 "owner_connected": ctx.owner_connected(),
                 "allow_count": len(entries),
-                "pending_count": sum(1 for r in reqs if r.status == PENDING),
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
                 ),
@@ -553,7 +568,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         file_id = validate_drive_id(form.get("file_id"))
         try:
             entry = await blocking(ctx.grants().grant, file_id)
-            flash(request, "ok", f"Shared \u201c{entry.name}\u201d with the assistant.")
+            flash(request, "ok", f"Allowed \u201c{entry.name}\u201d for the assistant.")
         except GrantError as exc:
             flash(request, "error", str(exc))
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
@@ -562,7 +577,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         file_id = validate_drive_id(form.get("file_id"))
         try:
             await blocking(ctx.grants().revoke, file_id)
-            flash(request, "ok", "Access revoked.")
+            flash(request, "ok", "Removed. The assistant can no longer use it.")
         except GrantError as exc:
             flash(request, "error", str(exc))
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
@@ -649,6 +664,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="Page not found.")
         reset = current_actor.set(email)
         try:
+            await remember_pending(request)
             people = await blocking(_directory_rows)
         finally:
             current_actor.reset(reset)
@@ -727,15 +743,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 target += "?" + request.url.query
             return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
         request.session["mcp_auth"] = pending.to_dict()
-        return render(
-            request,
-            "consent.html",
-            client_name=pending.client_name,
-            redirect_uri=pending.redirect_uri,
-            scope=SCOPE,
-            requested_scope=pending.requested_scope,
-            tools=sorted(ADMIN_TOOLS),
-        )
+        reset = current_actor.set(signed_in)
+        try:
+            await remember_pending(request)
+            return render(
+                request,
+                "consent.html",
+                client_name=pending.client_name,
+                scope=SCOPE,
+                requested_scope=pending.requested_scope,
+            )
+        finally:
+            current_actor.reset(reset)
 
     async def oauth_decide(request: Request, form: dict[str, str]) -> Response:
         if ctx.mcp_oauth is None:
@@ -783,6 +802,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
         return _completion_page(url)
 
+    async def bridge_page(request: Request) -> Response:
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="The mailbox is not configured.")
+        email = str(request.session.get("owner") or "")
+        data = await blocking(ctx.mailbox.list_links, email)
+        return render(request, "bridge.html", **data)
+
+    def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
+        email = str(request.session.get("owner") or "")
+        if action == "revoke":
+            ctx.mailbox.revoke(email, link_id, purge)
+            return "Pairing revoked. Both assistants have lost send and receive."
+        result = ctx.mailbox.decide(email, link_id, action)
+        if action == "deny" or result["status"] == "revoked":
+            return "Pairing denied. Neither assistant can send on it."
+        if result["status"] == "active":
+            return "You approved. The mailbox is on."
+        return "You approved. The mailbox stays off until the other person approves."
+
+    async def bridge_decide(request: Request, form: dict[str, str]) -> Response:
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="The mailbox is not configured.")
+        link_id = request.path_params["link_id"]
+        action = request.path_params["action"]
+        if action not in ("approve", "deny", "revoke"):
+            return render(request, "error.html", 404, message="That page is not available.")
+        purge = form.get("purge") == "on"
+        try:
+            message = await blocking(_bridge_act, request, link_id, action, purge)
+        except MailboxError as exc:
+            flash(request, "error", exc.message)
+        else:
+            flash(request, "ok", message)
+        return RedirectResponse("/bridge", status_code=303)
+
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
@@ -794,7 +848,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(request, "ok", "Disconnected the app. Its tokens no longer work.")
         return RedirectResponse("/", status_code=303)
 
+    async def confirm_js(_: Request) -> Response:
+        return Response(
+            b"document.addEventListener('submit',function(e){"
+            b"var f=e.target;if(!f||!f.getAttribute)return;"
+            b"var m=f.getAttribute('data-confirm');"
+            b"if(m&&!window.confirm(m))e.preventDefault();});",
+            media_type="text/javascript",
+            headers={"cache-control": "no-store"},
+        )
+
     routes = [
+        Route("/confirm.js", confirm_js, methods=["GET"]),
         Route("/login", login, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
@@ -809,6 +874,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
         Route("/requests/{rid}/deny", csrf_protected(request_deny), methods=["POST"]),
         Route("/activity", owner_only(activity), methods=["GET"]),
+        Route("/bridge", owner_only(bridge_page), methods=["GET"]),
+        Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", admin_page, methods=["GET"]),
         Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
@@ -832,6 +899,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ],
     )
     app.state.owner_email = settings.owner_email
+    # Mount("/") serves this app, so request.app is this app, not the outer one.
+    app.state.dashboard = ctx
     return app
 
 

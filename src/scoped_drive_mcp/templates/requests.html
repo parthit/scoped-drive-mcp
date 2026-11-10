@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Requests{% endblock %}
 {% macro table(items) %}
+<div class="scroll-x">
 <table>
   <thead><tr><th>Asked for</th><th>Token</th><th>Tool</th><th>Created</th><th>Status</th><th></th></tr></thead>
   <tbody>
@@ -18,6 +19,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endmacro %}
 {% block content %}
 <h1>Access requests</h1>

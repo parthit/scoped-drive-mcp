@@ -9,16 +9,17 @@
      control for sharing only selected files and folders with an app, so this server asks
      for broad Drive access and then enforces the list you tick yourself. That list, and
      the assistant you connect, are the features of the app.</p>
-  <p>This deployment is run by the person who set it up. The only Google account that can
-     open the dashboard is the owner account configured for it. The support email shown
-     on the Google sign-in screen is the contact for this app.</p>
+  <p>This deployment is run by the person who set it up. Any verified Google account can
+     sign in, unless that person limited sign-in to a list of addresses. You sign in with
+     your own Google account and tick your own files. The assistant uses that same account.
+     Each person’s files stay separate. The support email shown on the
+     Google sign-in screen is the contact for this app.</p>
 
   <h2>Google data we access</h2>
   <p>Sign-in requests these Google permissions, and no others:</p>
   <ul>
     <li><code>openid</code> and <code>email</code>, to read the account’s email address and
-        whether Google has verified it. We use that only to check that the account is the
-        signed-in account.</li>
+        whether Google has verified it. We use that to tell signed-in people apart.</li>
     <li><code>https://www.googleapis.com/auth/drive</code>, which can see, create, edit,
         and trash files in that account’s Drive. A narrower
         <code>drive.file</code> scope only covers files this app created or that you pick
@@ -51,7 +52,8 @@
   <h2>What we store</h2>
   <ul>
     <li>The Google refresh token, encrypted at rest, so the server can keep calling Drive
-        after you close the browser. It is stored in Redis (Upstash).</li>
+        after you close the browser. It is stored in Redis (Upstash) or Postgres, whichever
+        this deployment uses.</li>
     <li>The allowlist: the Drive file and folder ids you ticked.</li>
     <li>Access requests, kept for 7 days: a request id, the file id, a short description,
         the tool name, the connection name, your decision, and the file name only when your
@@ -63,6 +65,9 @@
         stored refresh token or the allowlist.</li>
     <li>If an assistant connects with OAuth: the name it registered and the tokens for
         that connection, so you can disconnect it.</li>
+    <li>Mailbox text between two assistants, kept for 14 days. The text is encrypted with
+        the same key as the refresh token. One person’s files are not stored with another
+        person’s mailbox.</li>
   </ul>
   <p>The app is served over HTTPS. Drive calls and the stored token use that encrypted
      connection and the encrypted record above.</p>
@@ -73,9 +78,9 @@
      assistant is a separate service. Sending the result there is the feature you turned
      on by connecting it and ticking those items. What the assistant does next is covered
      by its own terms.</p>
-  <p>The app runs on Vercel. The encrypted token, allowlist, requests, and activity log
-     are stored in Upstash Redis so the gateway can run. File contents are not stored
-     with them.</p>
+  <p>The app runs on Vercel. The encrypted token, allowlist, requests, activity log, and
+     mailbox text are stored in Upstash Redis or Postgres so the gateway can run. File
+     contents are not stored with them.</p>
 
   <h2>Limited use</h2>
   <p>Scoped Drive’s use of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>

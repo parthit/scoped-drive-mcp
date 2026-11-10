@@ -9,8 +9,11 @@ const TAG_PATTERN =
 
 const INJECTION_PATTERN = /ignore\s+(all\s+|any\s+)?(previous|prior|above)\s+instructions/gi;
 
+const MARKER_PATTERN = /<<<\s*(end\s+)?untrusted\s+bot-bridge\s+message\s*>>>/gi;
+
 export function neutralize(body: string): string {
   return body
+    .replace(MARKER_PATTERN, (marker) => marker.replace(/</g, "‹").replace(/>/g, "›"))
     .replace(TAG_PATTERN, (tag) => tag.replace(/</g, "‹").replace(/>/g, "›"))
     .replace(INJECTION_PATTERN, "[removed-instruction-phrase]");
 }

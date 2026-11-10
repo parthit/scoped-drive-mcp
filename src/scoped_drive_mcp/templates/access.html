@@ -3,20 +3,21 @@
 {% block content %}
 <h1>What the assistant can use</h1>
 {% include "_mode.html" %}
-<p class="muted">Each item below is on the server's allowlist. Folders include everything inside them.
-  Revoking removes the item from the allowlist. If it was shared with an older bot account, that
+<p class="muted">Each item below is on your list. Folders include everything inside them.
+  Remove takes the item off that list. If it was shared with an older bot account, that
   Drive share is removed too.</p>
 {% if not bot.connected %}
 <div class="warn">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
   Sign out and sign in again.</div>
 {% endif %}
+<div class="scroll-x">
 <table>
   <thead><tr><th>Name</th><th>Type</th><th>Granted</th><th>Via</th><th></th></tr></thead>
   <tbody>
   {% if root_folder_id %}
   <tr>
     <td><code>{{ root_folder_id }}</code></td><td class="muted">Folder</td><td class="muted">—</td>
-    <td class="muted">ROOT_FOLDER_ID env var</td><td class="muted" style="text-align:right">change in Vercel</td>
+    <td class="muted">set on the server</td><td class="muted" style="text-align:right">server setting</td>
   </tr>
   {% endif %}
   {% for e in rows %}
@@ -26,17 +27,18 @@
     <td class="muted">{{ e.granted_at }}</td>
     <td class="muted">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">request</a>{% else %}dashboard{% endif %}</td>
     <td style="text-align:right">
-      <form class="inline" method="post" action="/revoke">
+      <form class="inline" method="post" action="/revoke" data-confirm="Remove this from the assistant?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <input type="hidden" name="next" value="/access">
-        <button class="danger" type="submit">Revoke</button>
+        <button class="danger" type="submit">Remove</button>
       </form>
     </td>
   </tr>
   {% else %}
-  {% if not root_folder_id %}<tr><td colspan="5" class="muted">Nothing is shared yet. <a href="/browse">Browse your Drive</a> to grant items.</td></tr>{% endif %}
+  {% if not root_folder_id %}<tr><td colspan="5" class="muted">Nothing is allowed yet. <a href="/browse">Browse your Drive</a> and click Allow.</td></tr>{% endif %}
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

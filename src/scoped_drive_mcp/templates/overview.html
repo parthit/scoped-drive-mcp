@@ -3,34 +3,43 @@
 {% block content %}
 <h1>Overview</h1>
 {% include "_mode.html" %}
-{% if missing %}
-<div class="warn">Missing settings: {% for m in missing %}<code>{{ m }}</code>{{ ", " if not loop.last }}{% endfor %}.
-  {% if store_kind == "memory" %}Without Redis, grants and requests are kept in memory and are lost when the server restarts.{% endif %}
-</div>
-{% endif %}
 {% if not bot.connected %}
 <div class="warn">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
   Sign out and sign in again.</div>
 {% endif %}
 <div class="grid">
-  <div class="card stat"><span class="muted">Shared items</span><b>{{ allow_count }}</b><a href="/access">Manage</a></div>
+  <div class="card stat"><span class="muted">Allowed items</span><b>{{ allow_count }}</b><a href="/access">Manage</a></div>
   <div class="card stat"><span class="muted">Pending requests</span><b>{{ pending_count }}</b><a href="/requests">Review</a></div>
   <div class="card stat"><span class="muted">Assistant acts as</span>
     <b style="font-size:16px">{% if bot.connected %}<span class="pill ok">connected</span>{% else %}<span class="pill bad">not connected</span>{% endif %}</b>
-    <span class="muted">{{ bot.email or "" }}{% if bot.source == "env" %} (env var){% elif bot.source == "owner" %} (your account){% endif %}</span></div>
-  <div class="card stat"><span class="muted">Owner account</span>
+    <span class="muted">{{ bot.email or "" }} (your account)</span></div>
+  <div class="card stat"><span class="muted">Your account</span>
     <b style="font-size:16px">{% if owner_connected %}<span class="pill ok">connected</span>{% else %}<span class="pill bad">not connected</span>{% endif %}</b>
     <span class="muted">{{ owner }}</span></div>
 </div>
-<div class="card">
-  <p>MCP endpoint for Grok: <code>{{ mcp_url }}</code></p>
-  {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in Vercel).</p>{% endif %}
-  <p class="muted">Storage: {{ store_kind }}. <a href="/browse">Browse your Drive</a> and tick what the assistant may use.</p>
-</div>
+
+<h2>Get started</h2>
+<ol class="steps">
+  <li class="done">Signed in as {{ owner }}. The assistant uses this Google account.</li>
+  <li{% if allow_count %} class="done"{% endif %}>
+    Tick at least one folder. <a href="/browse">Browse your Drive</a>
+    {% if allow_count %}<span class="pill ok">{{ allow_count }} allowed</span>{% endif %}
+  </li>
+  <li{% if grants %} class="done"{% endif %}>
+    Connect the assistant, then come back here and click Allow.
+    <ol>
+      <li>In Grok, add a connector and use this server address: <code>{{ mcp_url }}</code></li>
+      <li>In Muse, add a custom connector with that same address. Leave the client id empty.</li>
+      <li>In Cursor, add that same address as an MCP server.</li>
+      <li>When this site asks, click Allow. You can disconnect the app later on this page.</li>
+    </ol>
+  </li>
+</ol>
+
 <h2>Connected apps</h2>
-<p class="muted">Apps such as Grok Bot that signed in with OAuth. Revoking disconnects the app immediately.
-  An API token from <code>make_token.py</code> is not listed here.</p>
+<p class="muted">Apps such as Grok that signed in here. Disconnecting stops that app immediately.</p>
 {% if grants %}
+<div class="scroll-x">
 <table>
   <thead><tr><th>App</th><th>Connected</th><th>Last used</th><th></th></tr></thead>
   <tbody>
@@ -40,17 +49,32 @@
     <td class="muted">{{ grant.created_at }}</td>
     <td class="muted">{{ grant.last_used or "never" }}</td>
     <td style="text-align:right">
-      <form class="inline" method="post" action="/oauth/grants/revoke">
+      <form class="inline" method="post" action="/oauth/grants/revoke" data-confirm="Disconnect this app? It loses access immediately.">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="grant_id" value="{{ grant.id }}">
-        <button class="danger" type="submit">Revoke</button>
+        <button class="danger" type="submit">Disconnect</button>
       </form>
     </td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <div class="card"><p>No apps connected.</p></div>
+{% endif %}
+
+{% if is_admin %}
+<div class="card">
+  <h2>For the person running this server</h2>
+  {% if missing %}
+  <div class="warn">Missing settings: {% for m in missing %}<code>{{ m }}</code>{{ ", " if not loop.last }}{% endfor %}.
+    {% if store_kind == "memory" %}Without Redis or Postgres, grants and requests are kept in memory and are lost when the server restarts.{% endif %}
+  </div>
+  {% endif %}
+  <p>Server address: <code>{{ mcp_url }}</code></p>
+  {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in the server settings).</p>{% endif %}
+  <p class="muted">Storage: {{ store_kind }}. An API token from <code>make_token.py</code> is not listed with connected apps.</p>
+</div>
 {% endif %}
 {% endblock %}

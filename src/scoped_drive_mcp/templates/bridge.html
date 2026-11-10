@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Mailbox{% endblock %}
+{% block content %}
+<h1>Mailbox</h1>
+<p class="muted">This pairs your assistant with one other person's assistant. Both of you have to approve.
+  Messages are short text. They stay with your assistant, which should summarize them for you and wait.
+  The other person's Google account is the name you are confirming.</p>
+{% if not links %}
+<div class="card">
+  <p>No pairings yet.</p>
+  <ol>
+    <li>Ask your assistant to start a pairing and read you the code.</li>
+    <li>Give that code to the other person. Their assistant joins with it.</li>
+    <li>Both of you approve here, after you see the other Google account.</li>
+  </ol>
+</div>
+{% endif %}
+{% for link in links %}
+<div class="card">
+  <p>
+    {% if link.status == "active" %}<span class="pill ok">on</span>
+    {% elif link.status == "revoked" %}<span class="pill bad">off</span>
+    {% else %}<span class="pill pending">waiting</span>{% endif %}
+  </p>
+  <p>{% if link.peer_email %}Pairing with <b>{{ link.peer_email }}</b>.
+    {% else %}Waiting for the other person to join.{% endif %}</p>
+  {% if link.invite_code %}
+  <p>Invite code: <code>{{ link.invite_code }}</code></p>
+  {% endif %}
+  <p class="muted">{{ link.next_step }}</p>
+  {% if link.status == "pending_approval" and not link.you_approved %}
+  <form class="inline" method="post" action="/bridge/{{ link.link_id }}/approve">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="primary" type="submit">Approve pairing</button>
+  </form>
+  <form class="inline" method="post" action="/bridge/{{ link.link_id }}/deny">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="danger" type="submit">Deny</button>
+  </form>
+  {% elif link.status != "revoked" %}
+  <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Turn this mailbox off?">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label><input type="checkbox" name="purge" value="on"> Delete stored messages now</label>
+    <button class="danger" type="submit">Turn off</button>
+  </form>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

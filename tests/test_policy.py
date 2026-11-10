@@ -30,6 +30,15 @@ VALID_ARGS = {
     "check_access_request": {"request_id": "A" * 32},
 }
 
+MAILBOX_TOOLS = {
+    "request_link",
+    "list_links",
+    "send_message",
+    "list_inbox",
+    "check_messages",
+    "reply",
+    "mark_read",
+}
 VIEWER_EXPECTED = {
     "search_files",
     "list_folder",
@@ -37,7 +46,7 @@ VIEWER_EXPECTED = {
     "read_file",
     "request_access",
     "check_access_request",
-}
+} | MAILBOX_TOOLS
 EXPECTED = {
     Role.VIEWER: VIEWER_EXPECTED,
     Role.EDITOR: VIEWER_EXPECTED
@@ -48,7 +57,7 @@ EXPECTED = {
         "update_file_content",
         "rename_file",
     },
-    Role.ADMIN: set(VALID_ARGS),
+    Role.ADMIN: set(VALID_ARGS) | MAILBOX_TOOLS,
 }
 
 FORBIDDEN_TOOL_WORDS = ("move", "share", "permission", "delete", "parent")

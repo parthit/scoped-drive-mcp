@@ -2,7 +2,9 @@
 {% block title %}Activity{% endblock %}
 {% block content %}
 <h1>Recent activity</h1>
-<p class="muted">The last 500 audit events (newest first). Contents, names and search text are never logged.</p>
+<p class="muted">The last 500 audit events (newest first). Contents, names and search text are never logged.
+  The Item column is a Drive id, not a file name.</p>
+<div class="scroll-x">
 <table>
   <thead><tr><th>Time (UTC)</th><th>Who</th><th>What</th><th>Item</th><th>Decision</th><th>Reason</th></tr></thead>
   <tbody>
@@ -20,4 +22,5 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

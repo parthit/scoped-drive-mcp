@@ -85,6 +85,8 @@ class Settings(BaseSettings):
 
     owner_email: str | None = None
     bot_email: str | None = None
+    # Optional. When set, only these addresses (plus OWNER_EMAIL) can sign in.
+    allowed_emails: Annotated[frozenset[str], NoDecode] = frozenset()
     app_base_url: str | None = None
     session_secret: SecretStr | None = None
     encryption_key: SecretStr | None = None
@@ -142,6 +144,27 @@ class Settings(BaseSettings):
         value = value.strip()
         if not _DRIVE_ID.fullmatch(value):
             raise ValueError("ROOT_FOLDER_ID does not look like a Google Drive folder ID")
+        return value
+
+    @field_validator("allowed_emails", mode="before")
+    @classmethod
+    def _parse_allowed_emails(cls, value: object) -> object:
+        if value is None:
+            return frozenset()
+        if isinstance(value, str):
+            if not value.strip():
+                return frozenset()
+            emails: set[str] = set()
+            for chunk in value.split(","):
+                email = chunk.strip().lower()
+                if not email:
+                    continue
+                if not _EMAIL.fullmatch(email):
+                    raise ValueError(
+                        f"ALLOWED_EMAILS entry {chunk.strip()!r} is not an email address"
+                    )
+                emails.add(email)
+            return frozenset(emails)
         return value
 
     @field_validator("owner_email", "bot_email")
@@ -218,6 +241,15 @@ class Settings(BaseSettings):
         return value
 
     # ---- derived ---------------------------------------------------------
+
+    def sign_in_allowed(self, email: str) -> bool:
+        """Open sign-in, unless ALLOWED_EMAILS is set. The admin is always allowed."""
+        if not self.allowed_emails:
+            return True
+        allowed = set(self.allowed_emails)
+        if self.owner_email:
+            allowed.add(self.owner_email)
+        return email in allowed
 
     @property
     def same_account(self) -> bool:

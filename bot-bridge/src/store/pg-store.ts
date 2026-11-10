@@ -27,7 +27,7 @@ export class PgStore implements Store {
 
   async clearAll(): Promise<void> {
     await this.db.query(
-      "TRUNCATE TABLE audit_events, messages, manage_tokens, approvals, links, bots, users RESTART IDENTITY CASCADE",
+      "TRUNCATE TABLE audit_events, messages, manage_tokens, approvals, links, bots, users, rate_locks RESTART IDENTITY CASCADE",
     );
   }
 
@@ -183,11 +183,15 @@ export class PgStore implements Store {
     return rows[0] ? mapApproval(rows[0]) : null;
   }
 
-  async updateApproval(row: ApprovalRow): Promise<void> {
-    await this.db.query(
-      `UPDATE approvals SET token = $2, expires_at = $3, consumed_at = $4 WHERE approval_id = $1`,
-      [row.approval_id, row.token, row.expires_at, row.consumed_at],
+  async updateApproval(row: ApprovalRow): Promise<ApprovalRow | null> {
+    const rows = await this.db.query<Raw>(
+      `UPDATE approvals
+       SET token = $2, expires_at = $3
+       WHERE approval_id = $1 AND consumed_at IS NULL
+       RETURNING *`,
+      [row.approval_id, row.token, row.expires_at],
     );
+    return rows[0] ? mapApproval(rows[0]) : null;
   }
 
   async consumeApproval(approvalId: string, at: Date): Promise<ApprovalRow | null> {
@@ -339,6 +343,27 @@ export class PgStore implements Store {
       [threadId, now, botId],
     );
     return rows.map(mapMessage);
+  }
+
+  async tryConsumeRate(actor: string, now: Date, windowMs: number, limit: number): Promise<boolean> {
+    const cutoff = new Date(now.getTime() - windowMs);
+    const rows = await this.db.query(
+      `INSERT INTO rate_locks (actor, window_start, hits)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (actor) DO UPDATE
+       SET window_start = CASE
+             WHEN rate_locks.window_start <= $3 THEN EXCLUDED.window_start
+             ELSE rate_locks.window_start
+           END,
+           hits = CASE
+             WHEN rate_locks.window_start <= $3 THEN 1
+             ELSE rate_locks.hits + 1
+           END
+       WHERE rate_locks.window_start <= $3 OR rate_locks.hits < $4
+       RETURNING hits`,
+      [actor, now, cutoff, limit],
+    );
+    return rows.length > 0;
   }
 
   async insertAudit(row: AuditRow): Promise<void> {

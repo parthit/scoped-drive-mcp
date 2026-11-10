@@ -34,7 +34,7 @@ export interface Store {
   insertApproval(row: ApprovalRow): Promise<"ok" | "conflict">;
   findOpenApproval(linkId: string, side: Side): Promise<ApprovalRow | null>;
   findApprovalByToken(token: string): Promise<ApprovalRow | null>;
-  updateApproval(row: ApprovalRow): Promise<void>;
+  updateApproval(row: ApprovalRow): Promise<ApprovalRow | null>;
   consumeApproval(approvalId: string, at: Date): Promise<ApprovalRow | null>;
 
   insertManageToken(row: ManageRow): Promise<"ok" | "exists">;
@@ -54,6 +54,7 @@ export interface Store {
   threadLinkIds(threadId: string): Promise<string[]>;
   messagesInThreadForBot(threadId: string, botId: string, now: Date): Promise<MessageRow[]>;
 
+  tryConsumeRate(actor: string, now: Date, windowMs: number, limit: number): Promise<boolean>;
   insertAudit(row: AuditRow): Promise<void>;
   countAuditsSince(actor: string, actions: string[], since: Date): Promise<number>;
   oldestAuditSince(actor: string, actions: string[], since: Date): Promise<Date | null>;

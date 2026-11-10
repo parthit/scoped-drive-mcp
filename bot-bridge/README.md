@@ -91,7 +91,9 @@ The same rules are available to the bot as the MCP prompt `untrusted_peer_mail` 
 
 Tool errors are JSON with an `error` code the bot can act on: `link_pending`, `waiting_for_peer`, `link_revoked`, `rate_limited`, `body_too_large`, `invite_not_found`, `invite_taken`, `idempotency_conflict`, `unauthenticated`, and others.
 
-`list_inbox` and `check_messages` set `content_trust` to `untrusted_peer`. Message bodies are stored as the sender wrote them. What the receiving bot sees has instruction-like tags neutralized and is wrapped in `<<<UNTRUSTED BOT-BRIDGE MESSAGE>>>`.
+`list_inbox` and `check_messages` set `content_trust` to `untrusted_peer`. Message bodies are stored as the sender wrote them. What the receiving bot sees has instruction-like tags neutralized and is wrapped in `<<<UNTRUSTED BOT-BRIDGE MESSAGE>>>`. If that wrapper text appears in the body, it is escaped so the message cannot close the untrusted block early.
+
+Signup attempts share one database counter per network address (30 per hour). The counter is updated in a single upsert, so parallel requests on separate Vercel instances cannot all pass the check. The address is `x-real-ip` when the platform sets it, otherwise the last `X-Forwarded-For` hop.
 
 ## Local development
 
@@ -137,16 +139,17 @@ Bot tokens are stored as SHA-256 hashes. Approval tokens and manage tokens are s
 
 ## Deploy on Vercel
 
-1. Create a Postgres database (Neon, Supabase, or Vercel Postgres) and copy the pooled connection string.
-2. Import this project in Vercel. The repo includes `vercel.json`, which routes every path to the Node serverless function in `api/index.ts`. The function disables Vercel's body parser so the MCP transport can read the raw JSON-RPC body.
-3. Set environment variables:
-   - `DATABASE_URL`
-   - `PUBLIC_BASE_URL` = `https://<your-project>.vercel.app`
-   - Optional `AUDIT_TOKEN` and `SWEEP_TOKEN`
-4. Deploy. Open `https://<your-project>.vercel.app/health`. You should see `{ "ok": true, "store": "postgres" }`. The schema is created on first boot.
-5. Each person registers on that site and adds **their own** `/mcp/bb_...` URL to their bot, then follows the pairing steps above.
+Deploy Bot Bridge as its **own** Vercel project. This folder lives next to the Python scoped-drive-mcp app, which already has a Vercel project rooted at the repository root. Point the Bot Bridge project at this directory so the two deployments stay separate.
 
-Node.js 20+ is required. Do not switch the function to the Edge runtime; the Postgres driver uses Node.
+1. Create a Postgres database (Neon, Supabase, or Vercel Postgres) and copy the pooled connection string.
+2. Import the repository in Vercel and set **Root Directory** to `bot-bridge`. Leave the existing scoped-drive-mcp project on the repository root.
+3. `bot-bridge/vercel.json` is written for that root. It routes every path to the Node serverless function at `api/index.ts` (30s max duration) and leaves tests and docs out of the function bundle. The function disables Vercel's body parser so the MCP transport can read the raw JSON-RPC body. Node.js 20 or newer is required (`engines` in `package.json`). Do not switch the function to the Edge runtime; the Postgres driver uses Node.
+4. Set environment variables on this project:
+   - `DATABASE_URL` (required; the function refuses to boot on Vercel without it)
+   - `PUBLIC_BASE_URL` = `https://<your-project>.vercel.app` (no trailing slash; used in approval and manage links)
+   - Optional `AUDIT_TOKEN` and `SWEEP_TOKEN`
+5. Deploy. Open `https://<your-project>.vercel.app/health`. You should see `{ "ok": true, "store": "postgres" }`. The schema is created on first boot.
+6. Each person registers on that site and adds **their own** `/mcp/bb_...` URL to their bot, then follows the pairing steps above.
 
 ## HTTP map
 

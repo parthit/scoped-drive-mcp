@@ -23,6 +23,10 @@ METADATA = f"{BASE_URL}/.well-known/oauth-protected-resource/mcp"
 DONE = done_redirect(BASE_URL)
 GROK = "https://grok.com/connectors-oauth-exchange-code/"
 CURSOR = "cursor://anysphere.cursor-mcp/oauth/callback"
+MUSE = (
+    "https://muse.ai/api/hatch/oauth/callback",
+    "https://agent.meta.ai/api/hatch/oauth/callback",
+)
 
 INIT = {
     "jsonrpc": "2.0",
@@ -227,6 +231,13 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "read_file",
         "request_access",
         "check_access_request",
+        "request_link",
+        "list_links",
+        "send_message",
+        "list_inbox",
+        "check_messages",
+        "reply",
+        "mark_read",
     }
     assert "trash_file" not in names
     assert spy.oauth_ops == 0
@@ -251,6 +262,13 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "https://cursor.com/agents/mcp/oauth/callback?next=https://evil.example",
         "https://grok.com/connectors-oauth-exchange-code",
         "https://grok.com/connectors-oauth-exchange-code/extra",
+        "https://muse.ai/api/hatch/oauth/callback/",
+        "https://www.muse.ai/api/hatch/oauth/callback",
+        "https://muse.ai.evil.example/api/hatch/oauth/callback",
+        "https://evil.muse.ai/api/hatch/oauth/callback",
+        "https://agent.meta.ai/api/hatch/oauth/callback/extra",
+        "https://platform.muse.ai/oauth/credential-test/callback/extra",
+        "http://muse.ai/api/hatch/oauth/callback",
         "http://localhost:8787/callback/extra",
         "http://localhost:8788/callback",
         "https://localhost:8787/callback",
@@ -267,6 +285,17 @@ def test_registration_rejects_foreign_redirects(c, uri: str) -> None:
     mixed = register(c, [DONE, uri])
     assert mixed.status_code == 400
     assert mixed.json()["error"] == "invalid_redirect_uri"
+
+
+def test_muse_can_register_its_callbacks(c) -> None:
+    response = register(c, list(MUSE), name="Muse")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["redirect_uris"] == list(MUSE)
+    assert body["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in body
+    platform = register(c, "https://platform.muse.ai/oauth/credential-test/callback", name="Muse")
+    assert platform.status_code == 201, platform.text
 
 
 def test_registration_accepts_allowed_redirects(c) -> None:
@@ -340,8 +369,8 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     page = owner_c.get("/oauth/authorize", params=params)
     assert page.status_code == 200
     assert "Cursor" in page.text
-    assert "drive" in page.text
-    assert "trash_file" in page.text
+    assert "Drive trash" in page.text
+    assert "trash_file" not in page.text
     assert "something-else" in page.text
     denied = post(owner_c, "/oauth/authorize", decision="deny")
     target = posted_redirect(owner_c, denied)
@@ -406,7 +435,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     assert hash_in(access) in stored
 
     names = tool_names(owner_c, access)
-    assert len(names) == 12
+    assert len(names) == 19
     assert "trash_file" in names
     dashboard = owner_c.get("/", headers={"Authorization": f"Bearer {access}"})
     assert dashboard.status_code == 200
