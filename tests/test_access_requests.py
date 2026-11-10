@@ -306,6 +306,20 @@ def test_pending_count_reads_waiting_ids_not_the_history() -> None:
     assert not any(key.startswith("req:") for key in reads)
 
 
+def test_pending_backfill_includes_requests_older_than_the_newest_page() -> None:
+    store = MemoryStore()
+    reqs = AccessRequests(store)
+    older, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id="older")
+    for i in range(100):
+        req, _ = reqs.create(tool="read_file", token_name="t", reason="r", file_id=f"n{i}")
+        reqs.decide(req, "denied")
+    assert older.id not in {item.id for item in reqs.recent(100)}
+    store.delete("requests:pending")
+    store.delete("requests:pending_ready")
+    assert reqs.pending_count() == 1
+    assert older.id in store.lrange("requests:pending", 0, -1)
+
+
 def test_pending_count_rebuilds_a_missing_waiting_list() -> None:
     store = MemoryStore()
     reqs = AccessRequests(store)

@@ -165,14 +165,19 @@ class AccessRequests:
     def pending_count(self) -> int:
         """How many requests are still waiting. One list read, then one read per waiting id.
 
-        The history list is walked once per tenant, the first time this is asked, so requests
-        saved before the waiting list existed are not dropped. Later calls do not walk it.
+        The whole history list (up to INDEX_MAX) is walked once per tenant, the first time
+        this is asked, so a waiting request saved before that list existed is still counted.
+        Later calls do not walk it.
         """
         if self.store.get(PENDING_READY) is None:
             seen = set(self.store.lrange(PENDING_INDEX, 0, -1))
-            for req in self.recent(100):
-                if req.status == PENDING and req.id not in seen:
-                    self.store.lpush(PENDING_INDEX, req.id)
+            for rid in self.store.lrange(INDEX_KEY, 0, INDEX_MAX - 1):
+                if rid in seen:
+                    continue
+                req = self.get(rid)
+                if req is not None and req.status == PENDING:
+                    self.store.lpush(PENDING_INDEX, rid)
+                    seen.add(rid)
             self.store.set(PENDING_READY, "1")
         count = 0
         seen_ids: set[str] = set()
