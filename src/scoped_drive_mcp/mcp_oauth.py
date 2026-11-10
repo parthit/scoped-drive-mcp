@@ -1,6 +1,6 @@
 """OAuth 2.1 authorization server for the MCP endpoint.
 
-Grok Bot and other remote MCP clients authenticate only with OAuth (PKCE S256,
+Grok Bot, Muse, and other remote MCP clients authenticate only with OAuth (PKCE S256,
 RFC 8414 / RFC 7591 / RFC 9728, MCP authorization 2025-06-18). This module is
 the authorization server and the protected-resource metadata. It does not replace
 pre-shared `API_TOKENS` bearers; those are checked first in `BearerAuthMiddleware`
@@ -54,6 +54,12 @@ ALLOWED_REDIRECT_URIS = frozenset(
         "https://cursor.com/agents/mcp/oauth/callback",
         "https://cursor.com/bot/mcp/oauth/callback",
         "https://grok.com/connectors-oauth-exchange-code/",
+        # Meta Muse chat. muse.ai is the current host; agent.meta.ai is the older
+        # one Muse still sends. The platform callback is used when Muse tests the
+        # credential. A registration that includes any other URL is still rejected.
+        "https://muse.ai/api/hatch/oauth/callback",
+        "https://agent.meta.ai/api/hatch/oauth/callback",
+        "https://platform.muse.ai/oauth/credential-test/callback",
         "http://localhost:8787/callback",
         "http://127.0.0.1:8787/callback",
     }
