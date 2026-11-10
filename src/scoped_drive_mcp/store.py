@@ -40,6 +40,14 @@ end
 return #ARGV
 """
 
+_INCR_SCRIPT = """
+local n = redis.call('INCR', KEYS[1])
+if tonumber(n) == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return n
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -56,6 +64,8 @@ class KeyValueStore(Protocol):
     def lpush(self, key: str, value: str) -> None: ...
     def ltrim(self, key: str, start: int, stop: int) -> None: ...
     def lrange(self, key: str, start: int, stop: int) -> list[str]: ...
+    def lrem(self, key: str, value: str) -> int: ...
+    def incr(self, key: str, ex: int) -> int: ...
 
 
 class MemoryStore:
@@ -146,6 +156,25 @@ class MemoryStore:
             end = None if stop == -1 else stop + 1
             return list(current[start:end])
 
+    def lrem(self, key: str, value: str) -> int:
+        with self._lock:
+            current = self._live(key)
+            if not isinstance(current, list):
+                return 0
+            kept = [item for item in current if item != value]
+            removed = len(current) - len(kept)
+            current[:] = kept
+            return removed
+
+    def incr(self, key: str, ex: int) -> int:
+        """Add one and return the new value. An expired key starts again at 1."""
+        with self._lock:
+            current = self._live(key)
+            count = int(current) + 1 if isinstance(current, str) and current.isdigit() else 1
+            expires = self._clock() + ex if ex else None
+            self._values[key] = (expires, str(count))
+            return count
+
     def set_if_absent(self, key: str, value: str, ex: int) -> bool:
         """Set `key` only when it is missing or expired. True when this caller won."""
         with self._lock:
@@ -206,6 +235,15 @@ class RedisStore:
 
     def lrange(self, key: str, start: int, stop: int) -> list[str]:
         return [str(v) for v in self._redis.lrange(key, start, stop) or []]
+
+    def lrem(self, key: str, value: str) -> int:
+        removed = self._redis.lrem(key, 0, value)
+        return int(removed or 0)
+
+    def incr(self, key: str, ex: int) -> int:
+        """INCR and, on the first hit, EXPIRE. One script so the TTL cannot be skipped."""
+        value = self._redis.eval(_INCR_SCRIPT, keys=[key], args=[ex])
+        return int(value)
 
     def set_if_absent(self, key: str, value: str, ex: int) -> bool:
         """SET NX with a TTL. True only when this caller created the key."""
@@ -292,6 +330,12 @@ class ActorStore:
 
     def lrange(self, key: str, start: int, stop: int) -> list[str]:
         return self.inner.lrange(self._key(key), start, stop)
+
+    def lrem(self, key: str, value: str) -> int:
+        return int(self.inner.lrem(self._key(key), value))
+
+    def incr(self, key: str, ex: int) -> int:
+        return int(self.inner.incr(self._key(key), ex))
 
 
 class PostgresStore:
@@ -512,6 +556,42 @@ class PostgresStore:
             return [str(row[0]) for row in rows]
 
         return self._run(read)
+
+    def lrem(self, key: str, value: str) -> int:
+        def remove(conn: Any) -> int:
+            result = conn.execute(
+                "DELETE FROM sdm_list WHERE key = %s AND value = %s",
+                (key, value),
+            )
+            return int(result.rowcount or 0)
+
+        return int(self._run(remove))
+
+    def incr(self, key: str, ex: int) -> int:
+        """Add one in a single statement. An expired row starts again at 1."""
+
+        def bump(conn: Any) -> int:
+            row = conn.execute(
+                """
+                INSERT INTO sdm_kv (key, value, expires_at)
+                VALUES (%s, '1', NOW() + (%s * INTERVAL '1 second'))
+                ON CONFLICT (key) DO UPDATE
+                SET value = (
+                    CASE
+                        WHEN sdm_kv.expires_at IS NOT NULL AND sdm_kv.expires_at <= NOW()
+                            THEN 1
+                        WHEN sdm_kv.value ~ '^[0-9]+$' THEN sdm_kv.value::bigint + 1
+                        ELSE 1
+                    END
+                )::text,
+                expires_at = EXCLUDED.expires_at
+                RETURNING value
+                """,
+                (key, ex),
+            ).fetchone()
+            return int(row[0])
+
+        return int(self._run(bump))
 
     def set_if_absent(self, key: str, value: str, ex: int) -> bool:
         """Insert a row only when the key is missing. An expired row is cleared first."""

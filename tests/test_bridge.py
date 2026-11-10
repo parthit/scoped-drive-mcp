@@ -1,12 +1,13 @@
 """Mailbox pairing, isolation, and the signed-in approval page."""
 
 import json
+import threading
 
 import pytest
 from cryptography.fernet import Fernet
 
 from scoped_drive_mcp.bridge import UNTRUSTED_END, UNTRUSTED_START, Mailbox, MailboxError
-from scoped_drive_mcp.store import MemoryStore
+from scoped_drive_mcp.store import MemoryStore, PrefixedStore
 from tests.conftest import OWNER_EMAIL, FakeClock
 from tests.dash import client, csrf, login, mcp_call
 
@@ -97,8 +98,10 @@ def test_revoke_hides_mail_and_purge_deletes_it() -> None:
     assert revoked.value.code == "link_revoked"
     assert box.store.get(f"bridge:msg:{sent['msg_id']}") is not None
 
+    assert sent["msg_id"] in box.store.lrange(f"bridge:inbox:{EVE}", 0, -1)
     box.revoke(OWNER_EMAIL, link_id, purge=True)
     assert box.store.get(f"bridge:msg:{sent['msg_id']}") is None
+    assert box.store.lrange(f"bridge:inbox:{EVE}", 0, -1) == []
 
 
 def test_invite_expires_and_send_is_capped(clock: FakeClock) -> None:
@@ -185,3 +188,127 @@ def test_mcp_send_stays_off_until_the_dashboard_approves(app) -> None:
     text = blocked["content"][0]["text"]
     payload = json.loads(text.split(": ", 1)[1])
     assert payload["error"] == "link_pending"
+
+
+def test_same_thread_id_can_be_used_on_two_links() -> None:
+    box = _box()
+    eve_link = _pair(box)
+    created = box.request_link(OWNER_EMAIL)
+    box.request_link(CAROL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+    box.decide(CAROL, created["link_id"], "approve")
+
+    box.send_message(OWNER_EMAIL, eve_link, "for eve", thread_id="chat")
+    box.send_message(OWNER_EMAIL, created["link_id"], "for carol", thread_id="chat")
+    eve_mail = box.list_inbox(EVE)["messages"]
+    carol_mail = box.list_inbox(CAROL)["messages"]
+    assert len(eve_mail) == 1 and "for eve" in eve_mail[0]["body"]
+    assert len(carol_mail) == 1 and "for carol" in carol_mail[0]["body"]
+    assert "for carol" not in eve_mail[0]["body"]
+
+    replied = box.reply(EVE, "back", thread_id="chat")
+    assert replied["thread_id"] == "chat"
+    assert box.check_messages(OWNER_EMAIL)["unread_count"] == 1
+
+
+def test_dead_inbox_ids_do_not_hide_live_mail() -> None:
+    box = _box()
+    link_id = _pair(box)
+    sent = box.send_message(OWNER_EMAIL, link_id, "still here")
+    inbox_key = f"bridge:inbox:{EVE}"
+    for n in range(2000):
+        box.store.lpush(inbox_key, f"msg_gone_{n}")
+
+    page = box.list_inbox(EVE, limit=10)
+    assert [row["msg_id"] for row in page["messages"]] == [sent["msg_id"]]
+    assert box.check_messages(EVE)["unread_count"] == 1
+    assert box.store.lrange(inbox_key, 0, -1) == [sent["msg_id"]]
+
+
+def test_interrupted_send_is_finished_by_the_same_idempotency_key() -> None:
+    class InboxPushFails(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+
+        def lpush(self, key: str, value: str) -> None:
+            if self.fail and key.startswith("bridge:inbox:"):
+                self.fail = False
+                raise RuntimeError("timeout")
+            super().lpush(key, value)
+
+    store = InboxPushFails()
+    box = Mailbox(store, base_url="https://drive-test.example.com", clock=store._clock)
+    link_id = _pair(box)
+    with pytest.raises(RuntimeError, match="timeout"):
+        box.send_message(OWNER_EMAIL, link_id, "hello", idempotency_key="once")
+    assert box.list_inbox(EVE)["messages"] == []
+
+    finished = box.send_message(OWNER_EMAIL, link_id, "hello", idempotency_key="once")
+    assert finished["idempotent_replay"] is False
+    inbox = box.list_inbox(EVE)["messages"]
+    assert len(inbox) == 1
+    assert inbox[0]["msg_id"] == finished["msg_id"]
+
+    replay = box.send_message(OWNER_EMAIL, link_id, "hello", idempotency_key="once")
+    assert replay["idempotent_replay"] is True
+    assert replay["msg_id"] == finished["msg_id"]
+    assert len(box.list_inbox(EVE)["messages"]) == 1
+    with pytest.raises(MailboxError) as conflict:
+        box.send_message(OWNER_EMAIL, link_id, "different", idempotency_key="once")
+    assert conflict.value.code == "idempotency_conflict"
+
+
+def test_replay_does_not_spend_another_send_at_the_cap() -> None:
+    box = _box()
+    link_id = _pair(box)
+    for n in range(29):
+        box.send_message(OWNER_EMAIL, link_id, f"note {n}")
+    sent = box.send_message(OWNER_EMAIL, link_id, "last", idempotency_key="last")
+    replay = box.send_message(OWNER_EMAIL, link_id, "last", idempotency_key="last")
+    assert replay["msg_id"] == sent["msg_id"]
+    assert replay["idempotent_replay"] is True
+    with pytest.raises(MailboxError) as limited:
+        box.send_message(OWNER_EMAIL, link_id, "one more")
+    assert limited.value.code == "rate_limited"
+
+
+def test_concurrent_sends_share_one_hourly_cap() -> None:
+    box = _box()
+    link_id = _pair(box)
+    barrier = threading.Barrier(40)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def go() -> None:
+        barrier.wait()
+        try:
+            box.send_message(OWNER_EMAIL, link_id, "burst")
+            outcome = "ok"
+        except MailboxError as exc:
+            outcome = exc.code
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=go) for _ in range(40)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results.count("ok") == 30
+    assert results.count("rate_limited") == 10
+    assert box.check_messages(EVE)["unread_count"] == 30
+
+
+def test_prefixed_store_incr_expires_and_lrem_removes_every_copy() -> None:
+    clock = FakeClock()
+    store = PrefixedStore(MemoryStore(clock=clock), prefix="sdm:")
+    assert store.incr("n", ex=10) == 1
+    assert store.incr("n", ex=10) == 2
+    clock.advance(11)
+    assert store.incr("n", ex=10) == 1
+    store.lpush("box", "a")
+    store.lpush("box", "b")
+    store.lpush("box", "a")
+    assert store.lrem("box", "a") == 2
+    assert store.lrange("box", 0, -1) == ["b"]

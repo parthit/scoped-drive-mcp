@@ -6,6 +6,7 @@ only after both humans approve on the dashboard. Message bodies are stored as
 written and wrapped as untrusted data when a tool reads them.
 """
 
+import hashlib
 import json
 import re
 import secrets
@@ -150,12 +151,7 @@ class Mailbox:
                 idempotency_key=idempotency_key,
             )
         assert thread_id is not None
-        link_id = self.store.get(f"bridge:thread:{thread_id}")
-        if not link_id:
-            raise MailboxError("not_found", "No matching thread for this person.")
-        link = self._require_party(you, link_id)
-        if not self._thread_has_person(thread_id, you):
-            raise MailboxError("not_found", "No matching thread for this person.")
+        link = self._link_for_thread(you, thread_id)
         return self._deliver(
             you,
             link["link_id"],
@@ -353,10 +349,6 @@ class Mailbox:
                 "thread_id must be 1–80 letters, numbers, underscores, or hyphens.",
             )
         link = self._require_active(you, link_id)
-        if key:
-            existing_id = self.store.get(f"bridge:idem:{you}:{key}")
-            if existing_id:
-                return self._replay(existing_id, you, link["link_id"], body, thread_id)
         _check_body(body)
         peer = self._other(link, you)
         if peer is None:
@@ -366,11 +358,12 @@ class Mailbox:
                 link_id=link["link_id"],
                 status=self._status(link),
             )
+        idem_key = f"bridge:idem:{you}:{key}" if key else None
+        if idem_key:
+            existing = self.store.get(idem_key)
+            if existing:
+                return self._finish_idem(existing, idem_key, you, link, peer, body, thread_id)
         thread = thread_id or _id("thr")
-        owner = self.store.get(f"bridge:thread:{thread}")
-        if owner and owner != link["link_id"]:
-            raise MailboxError("thread_mismatch", "That thread belongs to a different link.")
-        self._charge_send(you, link["link_id"])
         now = self._now()
         message = {
             "msg_id": _id("msg"),
@@ -383,21 +376,122 @@ class Mailbox:
             "read_at": None,
             "expires_at": _iso(now + MESSAGE_TTL),
         }
-        idem_key = f"bridge:idem:{you}:{key}"
-        if key and not self.store.set_if_absent(idem_key, message["msg_id"], ex=MESSAGE_TTL):
-            winner = self.store.get(idem_key)
-            if winner:
-                return self._replay(winner, you, link["link_id"], body, thread)
+        pending = _pending_token(message, thread_id or "", now, body)
+        if idem_key and not self.store.set_if_absent(idem_key, pending, ex=MESSAGE_TTL):
+            winner = self.store.get(idem_key) or ""
+            if not winner:
+                raise MailboxError(
+                    "idempotency_conflict",
+                    "That idempotency key was already used with a different message.",
+                )
+            return self._finish_idem(winner, idem_key, you, link, peer, body, thread_id)
+        try:
+            self._charge_once(you, link["link_id"], message["msg_id"])
+        except MailboxError:
+            self._release_pending(idem_key, pending, peer, message["msg_id"])
+            raise
+        self._publish(message)
+        if idem_key:
+            self.store.set(idem_key, message["msg_id"], ex=MESSAGE_TTL)
+        return _sent(message, replay=False)
+
+    def _finish_idem(
+        self,
+        token: str,
+        idem_key: str,
+        you: str,
+        link: dict[str, Any],
+        peer: str,
+        body: str,
+        thread_id: str | None,
+    ) -> dict[str, Any]:
+        """Finish or replay a reserved send. A pending key is not success until it is queued."""
+        pending = _split_pending(token)
+        if pending is None:
+            return self._replay(token, you, link["link_id"], body, thread_id)
+        msg_id, thread, client_thread, created, digest = pending
+        if _digest(link["link_id"], client_thread, body) != digest:
             raise MailboxError(
                 "idempotency_conflict",
                 "That idempotency key was already used with a different message.",
             )
+        if thread_id and thread_id != thread:
+            raise MailboxError(
+                "idempotency_conflict",
+                "That idempotency key was already used with a different message.",
+            )
+        message = self._message(msg_id)
+        if message is None:
+            message = {
+                "msg_id": msg_id,
+                "link_id": link["link_id"],
+                "from": you,
+                "to": peer,
+                "body": body,
+                "thread_id": thread,
+                "created_at": _iso(created),
+                "read_at": None,
+                "expires_at": _iso(created + MESSAGE_TTL),
+            }
+        elif (
+            message["from"] != you
+            or message["body"] != body
+            or message["link_id"] != link["link_id"]
+            or message["thread_id"] != thread
+        ):
+            raise MailboxError(
+                "idempotency_conflict",
+                "That idempotency key was already used with a different message.",
+            )
+        already_queued = self._queued(peer, msg_id)
+        try:
+            self._charge_once(you, link["link_id"], msg_id)
+        except MailboxError:
+            if not already_queued:
+                self._release_pending(idem_key, token, peer, msg_id)
+            raise
+        self._publish(message)
+        self.store.set(idem_key, msg_id, ex=MESSAGE_TTL)
+        return _sent(message, replay=already_queued)
+
+    def _release_pending(
+        self, idem_key: str | None, pending: str, peer: str, msg_id: str
+    ) -> None:
+        if idem_key and self.store.get(idem_key) == pending and not self._queued(peer, msg_id):
+            self.store.delete(idem_key)
+
+    def _charge_once(self, you: str, link_id: str, msg_id: str) -> None:
+        """Count this msg_id once. A retry that already paid does not pay again."""
+        flag = f"bridge:sent:{msg_id}"
+        if not self.store.set_if_absent(flag, "1", ex=MESSAGE_TTL):
+            return
+        try:
+            self._charge_send(you, link_id)
+        except MailboxError:
+            self.store.delete(flag)
+            raise
+
+    def _publish(self, message: dict[str, Any]) -> None:
+        """Save the body, then queue the id. A second call does not insert another copy."""
         self._save_message(message)
-        self.store.set(f"bridge:thread:{thread}", link["link_id"])
-        self.store.lpush(f"bridge:inbox:{peer}", message["msg_id"])
-        self.store.lpush(f"bridge:linkmsgs:{link['link_id']}", message["msg_id"])
-        self.store.lpush(f"bridge:threadmsgs:{thread}", message["msg_id"])
-        return _sent(message, replay=False)
+        link_id = message["link_id"]
+        thread = message["thread_id"]
+        self.store.set(f"bridge:thread:{link_id}:{thread}", link_id, ex=MESSAGE_TTL)
+        self._push_once(f"bridge:inbox:{message['to']}", message["msg_id"])
+        self._push_once(f"bridge:linkmsgs:{link_id}", message["msg_id"])
+        self._push_once(f"bridge:threadmsgs:{link_id}:{thread}", message["msg_id"])
+
+    def _push_once(self, key: str, msg_id: str) -> None:
+        """Queue `msg_id` unless this list already has it. The mark is written after the push."""
+        mark = f"bridge:queued:{key}:{msg_id}"
+        if self.store.get(mark) and msg_id in self.store.lrange(key, 0, -1):
+            return
+        if msg_id not in self.store.lrange(key, 0, -1):
+            self.store.lpush(key, msg_id)
+        self.store.set(mark, "1", ex=MESSAGE_TTL)
+
+    def _queued(self, peer: str, msg_id: str) -> bool:
+        return msg_id in self.store.lrange(f"bridge:inbox:{peer}", 0, -1)
 
     def _replay(
         self, msg_id: str, you: str, link_id: str, body: str, thread_id: str | None
@@ -419,37 +513,31 @@ class Mailbox:
 
     def _charge_attempt(self, you: str) -> None:
         bucket = int(self._now()) // HOUR
-        key = f"bridge:attempts:{you}:{bucket}"
-        count = _counter(self.store.get(key))
-        if count >= LINK_REQUESTS_PER_HOUR:
+        count = self.store.incr(f"bridge:attempts:{you}:{bucket}", ex=HOUR)
+        if count > LINK_REQUESTS_PER_HOUR:
             raise MailboxError(
                 "rate_limited",
                 "Too many pairing attempts this hour.",
                 retry_after_seconds=_retry(self._now(), bucket),
             )
-        self.store.set(key, str(count + 1), ex=HOUR)
 
     def _charge_send(self, you: str, link_id: str) -> None:
         bucket = int(self._now()) // HOUR
         retry = _retry(self._now(), bucket)
-        link_key = f"bridge:rate:{you}:{link_id}:{bucket}"
-        user_key = f"bridge:rate:{you}:{bucket}"
-        on_link = _counter(self.store.get(link_key))
-        if on_link >= PER_LINK_PER_HOUR:
+        on_link = self.store.incr(f"bridge:rate:{you}:{link_id}:{bucket}", ex=HOUR)
+        if on_link > PER_LINK_PER_HOUR:
             raise MailboxError(
                 "rate_limited",
                 "This link hit its hourly message cap.",
                 retry_after_seconds=retry,
             )
-        on_user = _counter(self.store.get(user_key))
-        if on_user >= PER_USER_PER_HOUR:
+        on_user = self.store.incr(f"bridge:rate:{you}:{bucket}", ex=HOUR)
+        if on_user > PER_USER_PER_HOUR:
             raise MailboxError(
                 "rate_limited",
                 "This account hit its hourly message cap.",
                 retry_after_seconds=retry,
             )
-        self.store.set(link_key, str(on_link + 1), ex=HOUR)
-        self.store.set(user_key, str(on_user + 1), ex=HOUR)
 
     def _public_link(self, link: dict[str, Any], you: str) -> dict[str, Any]:
         peer = self._other(link, you)
@@ -492,10 +580,16 @@ class Mailbox:
         }
 
     def _inbox_rows(self, you: str, link_id: str | None, unread_only: bool) -> list[dict[str, Any]]:
+        inbox_key = f"bridge:inbox:{you}"
         rows = []
-        for msg_id in self.store.lrange(f"bridge:inbox:{you}", 0, 1999):
+        seen: set[str] = set()
+        for msg_id in self.store.lrange(inbox_key, 0, -1):
+            if msg_id in seen:
+                continue
+            seen.add(msg_id)
             message = self._message(msg_id)
             if message is None or message["to"] != you:
+                self.store.lrem(inbox_key, msg_id)
                 continue
             if link_id and message["link_id"] != link_id:
                 continue
@@ -507,8 +601,28 @@ class Mailbox:
             rows.append(message)
         return rows
 
-    def _thread_has_person(self, thread_id: str, you: str) -> bool:
-        for msg_id in self.store.lrange(f"bridge:threadmsgs:{thread_id}", 0, 50):
+    def _link_for_thread(self, you: str, thread_id: str) -> dict[str, Any]:
+        found: list[dict[str, Any]] = []
+        for link_id in self._user_link_ids(you):
+            if not self.store.get(f"bridge:thread:{link_id}:{thread_id}"):
+                continue
+            link = self._link(link_id)
+            if link is None or you not in _parties(link, self._peer(link_id)):
+                continue
+            if self._thread_has_person(link_id, thread_id, you):
+                found.append(link)
+        if len(found) == 1:
+            return found[0]
+        if not found:
+            raise MailboxError("not_found", "No matching thread for this person.")
+        raise MailboxError(
+            "thread_mismatch",
+            "That thread id is in use on more than one of your links. Reply with msg_id.",
+        )
+
+    def _thread_has_person(self, link_id: str, thread_id: str, you: str) -> bool:
+        key = f"bridge:threadmsgs:{link_id}:{thread_id}"
+        for msg_id in self.store.lrange(key, 0, -1):
             message = self._message(msg_id)
             if message and you in (message["from"], message["to"]):
                 return True
@@ -603,10 +717,22 @@ class Mailbox:
 
     def _purge(self, link_id: str) -> int:
         deleted = 0
+        link = self._link(link_id)
+        people = [link["email_a"]] if link else []
+        peer = self._peer(link_id)
+        if peer and peer not in people:
+            people.append(peer)
         for msg_id in self.store.lrange(f"bridge:linkmsgs:{link_id}", 0, -1):
+            message = self._message(msg_id)
             if self.store.get(f"bridge:msg:{msg_id}") is not None:
                 self.store.delete(f"bridge:msg:{msg_id}")
                 deleted += 1
+            for person in people:
+                self.store.lrem(f"bridge:inbox:{person}", msg_id)
+            if message is not None:
+                thread_key = f"bridge:threadmsgs:{link_id}:{message['thread_id']}"
+                self.store.lrem(thread_key, msg_id)
+        self.store.delete(f"bridge:linkmsgs:{link_id}")
         return deleted
 
     def _user_link_ids(self, email: str) -> list[str]:
@@ -704,10 +830,26 @@ def _iso(at: float) -> str:
     return datetime.fromtimestamp(at, UTC).isoformat()
 
 
-def _counter(raw: str | None) -> int:
-    if raw and raw.isdigit():
-        return int(raw)
-    return 0
+def _digest(link_id: str, client_thread: str, body: str) -> str:
+    material = f"{link_id}\0{client_thread}\0{body}".encode()
+    return hashlib.sha256(material).hexdigest()[:32]
+
+
+def _pending_token(message: dict[str, Any], client_thread: str, created: float, body: str) -> str:
+    digest = _digest(message["link_id"], client_thread, body)
+    return f"p|{message['msg_id']}|{message['thread_id']}|{client_thread}|{int(created)}|{digest}"
+
+
+def _split_pending(token: str) -> tuple[str, str, str, float, str] | None:
+    if not token.startswith("p|"):
+        return None
+    parts = token.split("|")
+    if len(parts) != 6:
+        return None
+    _, msg_id, thread, client_thread, created, digest = parts
+    if not created.isdigit() or len(digest) != 32:
+        return None
+    return msg_id, thread, client_thread, float(created), digest
 
 
 def _retry(now: float, bucket: int) -> int:
