@@ -281,6 +281,16 @@ Allow grants the same tools as an admin API token, still limited to ticked items
 connection under **Connected apps**; **Revoke** disconnects it immediately. The dashboard sign-in cookie is not
 a token for `/mcp`.
 
+### Connect Muse
+
+Muse (muse.ai) also connects with OAuth and registers itself. Leave any client id and secret empty.
+
+1. Finish dashboard sign-in and tick at least one folder.
+2. In Muse, add a custom connector for `https://<project>.vercel.app/mcp`.
+3. When the browser opens, sign in and click Allow.
+
+The same **Connected apps** list shows the Muse connection, and **Revoke** disconnects it.
+
 ### 7. Test it
 
 1. **Ticked file works:** ask Grok "Read the doc *Test plan* in my Drive". It should quote it.
@@ -571,7 +581,7 @@ After changing dependencies, regenerate Vercel's requirements file:
   through a consent page. Access tokens last about an hour and refresh tokens about 30 days; only their
   SHA-256 hashes are stored. The connection is an admin token on `/mcp` and still cannot pass the allowlist.
   Revoke it under **Connected apps**. Pre-shared `API_TOKENS` bearers keep working and are not OAuth tokens.
-  Redirect URLs are an exact allow list (Cursor, Grok Bot, and a local test callback).
+  Redirect URLs are an exact allow list (Cursor, Grok Bot, Muse, and a local test callback).
 - **Audit log:** every tool call writes one JSON line to stdout, visible in Vercel's runtime logs. Each line has
   the time, token name, role, tool, file or parent ID, `allow`/`deny`/`error` and a reason. File contents,
   file names, search text and secrets are never logged.
