@@ -54,7 +54,7 @@
     <li>The Google refresh token, encrypted at rest, so the server can keep calling Drive
         after you close the browser. It is stored in Redis (Upstash) or Postgres, whichever
         this deployment uses.</li>
-    <li>The allowlist: the Drive file and folder ids you ticked.</li>
+    <li>The list you ticked: the Drive file and folder ids.</li>
     <li>Access requests, kept for 7 days: a request id, the file id, a short description,
         the tool name, the connection name, your decision, and the file name only when your
         sign-in can already see that file.</li>
@@ -62,7 +62,7 @@
         The same lines go to the host’s logs. They do not include file contents.</li>
     <li>A signed session cookie in your browser for about 8 hours. Signing out deletes
         that cookie. It does not contain your files, and signing out does not delete the
-        stored refresh token or the allowlist.</li>
+        stored refresh token or the list you ticked.</li>
     <li>If an assistant connects with OAuth: the name it registered and the tokens for
         that connection, so you can disconnect it.</li>
     <li>Mailbox text between two assistants, kept for 14 days. The text is encrypted with
@@ -78,7 +78,7 @@
      assistant is a separate service. Sending the result there is the feature you turned
      on by connecting it and ticking those items. What the assistant does next is covered
      by its own terms.</p>
-  <p>The app runs on Vercel. The encrypted token, allowlist, requests, activity log, and
+  <p>The app runs on Vercel. The encrypted token, the list you ticked, requests, activity log, and
      mailbox text are stored in Upstash Redis or Postgres so the gateway can run. File
      contents are not stored with them.</p>
 
@@ -96,7 +96,7 @@
 
   <h2>Manage or delete your data</h2>
   <ul>
-    <li>Untick an item in the dashboard to remove it from the allowlist. If that item was
+    <li>Remove an item in the dashboard to take it off your list. If that item was
         shared with an older assistant account, the share is removed too.</li>
     <li>Disconnect an assistant on the dashboard overview. That deletes the tokens stored
         for that connection.</li>
@@ -107,7 +107,7 @@
   </ul>
   <p>Access requests expire after 7 days. The activity log keeps only the latest 500
      events. Signing out ends the browser session and leaves the stored sign-in and
-     allowlist in place, so an assistant you already connected keeps the access you
+     your list in place, so an assistant you already connected keeps the access you
      granted until you untick it or disconnect the assistant.</p>
 
   <p>Scoped Drive is not directed at children under 13 and does not knowingly collect

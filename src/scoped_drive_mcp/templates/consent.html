@@ -6,7 +6,9 @@
   <p><b>{{ client_name }}</b> wants to connect to your Drive through this server.</p>
   <p>On the items you have ticked, it can search, read, create, edit, and rename.
      It can also move those items to Drive trash. Trash is recoverable for 30 days.</p>
-  <p>It cannot see the rest of your Drive, change who a file is shared with, or permanently delete a file.</p>
+  <p>Anything you have not ticked is refused by this server. The Google sign-in itself
+     can still reach the rest of your Drive. This server is what stops those calls.</p>
+  <p>It cannot change who a file is shared with, or permanently delete a file.</p>
   {% if requested_scope and requested_scope != scope %}
   <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server still only grants access to the items you have ticked.</p>
   {% endif %}

@@ -435,14 +435,17 @@ def test_overview_and_health_report_status(owner_c) -> None:
     page = owner_c.get("/").text
     assert "UPSTASH_REDIS_REST_URL" in page
     assert f"{BASE_URL}/mcp" in page
-    assert "uses this Google account" in page
+    assert "uses your Google account" in page
+    assert "whole Drive" in page
+    assert "Assistant acts as" not in page
     assert "make_token.py" in page  # admin-only operator note
 
 
 def test_non_admin_overview_hides_operator_notes(c) -> None:
     login(c, "eve-code")
     page = c.get("/").text
-    assert "uses this Google account" in page
+    assert "uses your Google account" in page
+    assert "whole Drive" in page
     assert f"{BASE_URL}/mcp" in page
     assert "make_token.py" not in page
     assert "UPSTASH_REDIS_REST_URL" not in page
