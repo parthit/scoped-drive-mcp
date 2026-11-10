@@ -1,10 +1,2 @@
-{% if mode == "same_account" %}
-<div class="warn" id="mode-warning"><b>Same-account mode.</b> There is no separate Google account
-  for the assistant, so it uses <b>your own</b> Google sign-in, which can reach your whole Drive.
-  Only the list you tick keeps it to those items. Google does not enforce that list. A second
-  Google account is the stronger wall.</div>
-{% else %}
-<p class="muted" id="mode-note">The assistant uses a separate Gmail
-  ({% if bot_email %}{{ bot_email }}{% else %}not connected yet{% endif %}).
-  Items you allow are shared with that account, and this server still checks your list.</p>
-{% endif %}
+<p class="muted" id="mode-note">The assistant uses your Google account. Only items you tick are available to it.
+  Google does not enforce that limit; this server's allowlist does.</p>

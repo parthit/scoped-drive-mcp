@@ -44,13 +44,12 @@ class FakeClock:
         self.now += seconds
 
 
-MODES = ("same_account", "separate_bot")
+MODES = ("same_account",)
 
 
 def build_tree(mode: str | None = None) -> FakeDrive:
-    """The phase-1 tree. With `mode`, every file belongs to the owner and the result is the
-    view the MCP tools get: the owner's own (sees everything) in same_account mode, or the
-    bot's, which only sees ROOT because only ROOT is shared with it, in separate_bot mode."""
+    """The phase-1 tree. With `mode`, every file belongs to the owner and the result is
+    that owner's view: the tools can see the whole Drive, and the allowlist is the limit."""
     d = FakeDrive()
     d.add(ROOT, "Shared With Grok", FOLDER_MIME, ["bot-my-drive-root"])
     d.add("bot-my-drive-root", "My Drive", FOLDER_MIME, [])
@@ -75,10 +74,7 @@ def build_tree(mode: str | None = None) -> FakeDrive:
     for f in d.files.values():
         f.owner = OWNER_EMAIL
     d.default_owner = OWNER_EMAIL
-    if mode == "same_account":
-        return d.as_user(OWNER_EMAIL)
-    d.share(ROOT, BOT_EMAIL, "writer")
-    return d.as_user(BOT_EMAIL)
+    return d.as_user(OWNER_EMAIL)
 
 
 def make_settings(**overrides) -> Settings:
@@ -268,7 +264,7 @@ def p2_app(world: FakeDrive, p2_settings: Settings, memstore: MemoryStore, oauth
 
     app = build_app(
         p2_settings,
-        world.as_user(BOT_EMAIL),
+        world.as_user(OWNER_EMAIL),
         store=memstore,
         owner_drive_factory=owner_factory,
         oauth=oauth,

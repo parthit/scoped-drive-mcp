@@ -80,7 +80,6 @@
       <a href="/requests" class="{{ 'on' if nav.startswith('/requests') }}">Requests{% if pending_count %} <span class="pill pending">{{ pending_count }}</span>{% endif %}</a>
       <a href="/activity" class="{{ 'on' if nav == '/activity' }}">Activity</a>
       <a href="/bridge" class="{{ 'on' if nav.startswith('/bridge') }}">Mailbox</a>
-      <a href="/connect-bot" class="{{ 'on' if nav == '/connect-bot' }}">Bot</a>
       {% if is_admin %}
       <a href="/admin" class="{{ 'on' if nav == '/admin' }}">Directory</a>
       {% endif %}

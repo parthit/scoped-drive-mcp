@@ -1,4 +1,4 @@
-"""Two people, two bots: Grok Bot for one cannot read the other's files."""
+"""Two people: Grok Bot for one cannot read the other's files."""
 
 import json
 
@@ -7,30 +7,22 @@ from scoped_drive_mcp.drive_client import FOLDER_MIME
 from scoped_drive_mcp.scope import ScopeGuard
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import KEY_PREFIX
-from tests.conftest import BOT_EMAIL, EVE, OWNER_EMAIL, make_settings
-from tests.dash import MCP_HEADERS, client, csrf, login, post, start_oauth
+from tests.conftest import EVE, OWNER_EMAIL, make_settings
+from tests.dash import MCP_HEADERS, client, login, post
 from tests.fake_drive import FakeDrive
 from tests.test_mcp_oauth import GROK, auth_params, code_from, exchange, posted_redirect, register
 
-EVE_BOT = "eve-bot@example.com"
-EVE_BOT_2 = "eve-bot-2@example.com"
 CAROL = "carol@example.com"
 EVE_DOC = "eve-doc"
 EVE_DOC_NAME = "Eve private memo"
 
 
 def _accounts(oauth) -> None:
-    oauth.accounts["eve-bot-code"] = (EVE_BOT, True)
-    oauth.accounts["eve-bot-2-code"] = (EVE_BOT_2, True)
     oauth.accounts["carol-code"] = (CAROL, True)
 
 
 def _extend(world: FakeDrive) -> None:
-    world.roots[EVE_BOT] = "eve-bot-root"
-    world.roots[EVE_BOT_2] = "eve-bot-2-root"
     world.roots[CAROL] = "carol-root"
-    world.add("eve-bot-root", "My Drive", FOLDER_MIME, [], owner=EVE_BOT)
-    world.add("eve-bot-2-root", "My Drive", FOLDER_MIME, [], owner=EVE_BOT_2)
     world.add("carol-root", "My Drive", FOLDER_MIME, [], owner=CAROL)
     world.add(EVE_DOC, EVE_DOC_NAME, "text/plain", ["eve-root"], b"eve only text", owner=EVE)
 
@@ -83,21 +75,16 @@ def _grok(c, name: str) -> str:
     return token.json()["access_token"]
 
 
-def _connect_bot(c, code: str):
-    state = start_oauth(c, "/connect-bot", csrf=csrf(c, "/connect-bot"))
-    return c.get("/auth/callback", params={"code": code, "state": state})
-
-
 def test_each_grok_bot_sees_only_that_users_files(world, memstore, oauth) -> None:
     app = _app(world, memstore, oauth)
     admin = client(app)
     eve = client(app)
     assert login(admin).status_code == 303
     assert login(eve, "eve-code").status_code == 303
-    assert _connect_bot(admin, "bot-code").status_code == 303
-    assert _connect_bot(eve, "eve-bot-code").status_code == 303
     assert post(admin, "/grant", file_id="loose-doc").status_code == 303
     assert post(eve, "/grant", file_id=EVE_DOC).status_code == 303
+    assert world.files["loose-doc"].permissions == []
+    assert world.files[EVE_DOC].permissions == []
 
     admin_token = _grok(admin, "Grok Ada")
     eve_token = _grok(eve, "Grok Eve")
@@ -122,15 +109,14 @@ def test_each_grok_bot_sees_only_that_users_files(world, memstore, oauth) -> Non
     eve_allow = memstore.hgetall(KEY_PREFIX + f"u:{EVE}:allowlist")
     assert "loose-doc" in allow and EVE_DOC not in allow
     assert EVE_DOC in eve_allow and "loose-doc" not in eve_allow
-    assert json.loads(allow["loose-doc"])["shared_with"] == BOT_EMAIL
-    assert json.loads(eve_allow[EVE_DOC])["shared_with"] == EVE_BOT
+    assert json.loads(allow["loose-doc"])["shared_with"] is None
+    assert json.loads(eve_allow[EVE_DOC])["shared_with"] is None
 
     admin.get("/")  # drop the grant flash before the directory page
     page = admin.get("/admin")
     assert page.status_code == 200
     text = page.text
     assert OWNER_EMAIL in text and EVE in text
-    assert BOT_EMAIL in text and EVE_BOT in text
     assert "Grok Ada" in text and "Grok Eve" in text
     assert "connected" in text
     for secret in ("loose-doc", EVE_DOC, "Loose memo", EVE_DOC_NAME, "proj-notes"):
@@ -140,38 +126,21 @@ def test_each_grok_bot_sees_only_that_users_files(world, memstore, oauth) -> Non
     assert 'href="/admin"' not in eve.get("/").text
 
 
-def test_bot_address_rules(world, memstore, oauth) -> None:
+def test_each_person_uses_their_own_sign_in(world, memstore, oauth) -> None:
     app = _app(world, memstore, oauth)
     eve = client(app)
     carol = client(app)
     assert login(eve, "eve-code").status_code == 303
-    assert _connect_bot(eve, "eve-bot-code").status_code == 303
     assert login(carol, "carol-code").status_code == 303
-
-    stolen = _connect_bot(carol, "eve-bot-code")
-    assert stolen.status_code == 403
-    assert "already used" in stolen.text
-    assert app.state.dashboard.directory.stored_bot_email(CAROL) is None
-
-    own = _connect_bot(eve, "eve-code")
-    assert own.status_code == 403
-    assert "different Google account" in own.text
-    assert app.state.dashboard.directory.stored_bot_email(EVE) == EVE_BOT
-
-    switched = _connect_bot(eve, "eve-bot-2-code")
-    assert switched.status_code == 403
-    assert "Disconnect" in switched.text
-    assert app.state.dashboard.directory.stored_bot_email(EVE) == EVE_BOT
-
-    assert post(eve, "/bot/disconnect").status_code == 303
+    assert post(eve, "/grant", file_id=EVE_DOC).status_code == 303
+    assert world.files[EVE_DOC].permissions == []
     assert app.state.dashboard.directory.stored_bot_email(EVE) is None
-    assert _connect_bot(eve, "eve-bot-2-code").status_code == 303
-    assert app.state.dashboard.directory.stored_bot_email(EVE) == EVE_BOT_2
-
-    post(eve, "/grant", file_id=EVE_DOC)
-    assert post(eve, "/access/share-bot").status_code == 303
-    emails = [p["emailAddress"] for p in world.files[EVE_DOC].permissions]
-    assert emails == [EVE_BOT_2]
+    assert app.state.dashboard.directory.stored_bot_email(CAROL) is None
+    eve_token = _grok(eve, "Grok Eve")
+    carol_token = _grok(carol, "Grok Carol")
+    assert _mcp(eve, eve_token, "read_file", file_id=EVE_DOC)["isError"] is False
+    denied = _mcp(carol, carol_token, "read_file", file_id=EVE_DOC)
+    assert denied["structuredContent"]["error"] == "access_required"
 
 
 def test_root_folder_id_is_only_the_admins(world, memstore, oauth) -> None:

@@ -138,27 +138,28 @@ else returns an `access_required` error with an approval link; the owner approve
 ```mermaid
 flowchart LR
     Grok -->|"Bearer token"| MCP["/mcp (BearerAuthMiddleware)"]
-    MCP --> Role["role check"] --> Guard["allowlist scope guard"] --> BotDrive["Drive API as BOT"]
+    MCP --> Role["role check"] --> Guard["allowlist scope guard"] --> UserDrive["Drive API as the signed-in user"]
     Guard -->|"out of scope"| Req["access request (Redis, 7-day TTL)"]
     Owner["Owner browser"] -->|"session cookie + CSRF"| Dash["dashboard (Starlette + Jinja2)"]
-    Dash -->|"owner token"| OwnerDrive["Drive API as OWNER: browse, permissions.create/delete"]
+    Dash -->|"owner token"| OwnerDrive["Drive API as that user: browse and allowlist"]
     Dash --> Redis[("Upstash Redis: allowlist, requests, encrypted tokens, activity")]
     Guard --> Redis
 ```
 
-### Enforcement: bot share + server allowlist (both layers)
+### Enforcement: server allowlist
 
-- **Grant:** with the owner's token, `permissions.create(type=user, emailAddress=BOT_EMAIL, role=writer,
-  sendNotificationEmail=false)`; store `{id, name, mime_type, permission_id, granted_at, request_id}` in the
-  Redis hash `sdm:allowlist`. Granting a shortcut grants its target.
-- **Revoke:** remove the allowlist entry first, then `permissions.delete(permission_id)` (a 404 is ignored; any
-  other failure is shown to the owner with instructions).
-- **Scope rule:** in scope if the id is allowlisted, or walking up `parents` with the bot's credentials reaches
+There is no second Google account. Drive calls use the signed-in user's refresh token. `BOT_EMAIL` is ignored.
+
+- **Grant:** store `{id, name, mime_type, permission_id, granted_at, request_id}` in the Redis hash
+  `sdm:allowlist`. A new tick does not call `permissions.create`. Granting a shortcut grants its target.
+- **Revoke:** remove the allowlist entry first, then `permissions.delete(permission_id)` when an older entry
+  still has one (a 404 is ignored; any other failure is shown to the owner with instructions).
+- **Scope rule:** in scope if the id is allowlisted, or walking up `parents` with the user's credentials reaches
   an allowlisted id. Missing/invisible parents stop the walk (out of scope). Cycle, depth and lookup caps and
   the ancestor cache (`SCOPE_CACHE_TTL`) are unchanged. `ROOT_FOLDER_ID` is optional and, if set, an extra
   allowlisted folder.
-- **Multi-parent rule:** in scope if ANY parent chain reaches an allowlisted id. The bot only sees the file if
-  the owner shared it, so this does not widen what Google allows.
+- **Multi-parent rule:** in scope if ANY parent chain reaches an allowlisted id. The allowlist is the limit;
+  the user's token can see the rest of their Drive.
 - **Freshness:** the allowlist is re-read at most every `ALLOWLIST_CACHE_TTL` seconds (default 2, max 10), and
   invalidated immediately on the instance that performed a grant/revoke.
 - **Protected items:** allowlisted items cannot be renamed or trashed; a directly granted file may still have its
@@ -182,17 +183,17 @@ flowchart LR
 
 ### Dashboard and auth
 
-- Pages: `/`, `/browse?folder=&q=`, `/access`, `/requests`, `/requests/<id>`, `/activity`, `/connect-bot`,
+- Pages: `/`, `/browse?folder=&q=`, `/access`, `/requests`, `/requests/<id>`, `/activity`,
   `/login`, `/auth/login`, `/auth/callback`, `POST /logout`, `POST /grant`, `POST /revoke`,
-  `POST /requests/<id>/approve|deny`, `POST /bot/disconnect`. Server-rendered Jinja2, inline CSS, no JS.
+  `POST /requests/<id>/approve|deny`. Server-rendered Jinja2, inline CSS, no JS.
 - One Google OAuth client of type Web application; redirect URI `APP_BASE_URL/auth/callback`; scopes
-  `openid email drive`, `access_type=offline`, `prompt=consent`. The flow (`owner` or `bot`) and a nonce travel
+  `openid email drive`, `access_type=offline`, `prompt=consent`. The owner flow and a nonce travel
   in an itsdangerous-signed `state` (10 minutes); the nonce is also in the session and is single-use.
-- The account is checked through the userinfo endpoint (`email_verified` required). Owner flow requires
-  OWNER_EMAIL; bot flow requires an owner session and BOT_EMAIL. Wrong accounts are rejected and their token is
-  revoked. The Drive scope must be granted.
-- Refresh tokens are Fernet-encrypted (ENCRYPTION_KEY) in Redis. The bot token from `/connect-bot` is used when
-  GOOGLE_OAUTH_REFRESH_TOKEN is not set (`LazyBotDriveClient`, re-read every 30 s).
+- The account is checked through the userinfo endpoint (`email_verified` required). A bot flow state is
+  rejected. The Drive scope must be granted.
+- Refresh tokens are Fernet-encrypted (ENCRYPTION_KEY) in Redis. Tools use the signed-in user's token.
+  `GOOGLE_OAUTH_REFRESH_TOKEN`, when set, overrides the admin's stored sign-in (`LazyBotDriveClient`, re-read
+  every 30 s). That value has to be the user's own token.
 - Session: Starlette `SessionMiddleware` (signed, httponly, Secure unless APP_BASE_URL is http://localhost,
   SameSite=Lax, 8 h). CSRF token per session on every POST, plus a same-origin `Origin` check. CSP, frame and
   referrer headers on every dashboard response. Referrer-Policy is `same-origin`: `no-referrer` would make
@@ -206,7 +207,7 @@ flowchart LR
 Required (reported by `/health` when missing): `API_TOKENS` (hard requirement), `GOOGLE_OAUTH_CLIENT_ID`,
 `GOOGLE_OAUTH_CLIENT_SECRET`, `OWNER_EMAIL`, `APP_BASE_URL`, `SESSION_SECRET`, `ENCRYPTION_KEY`,
 `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` (or `KV_REST_API_URL`/`KV_REST_API_TOKEN`).
-Optional: `BOT_EMAIL` (recommended, see below), `GOOGLE_OAUTH_REFRESH_TOKEN`, `ROOT_FOLDER_ID`, `AUTH_MODE`,
+Optional: `BOT_EMAIL` (loaded and ignored), `GOOGLE_OAUTH_REFRESH_TOKEN`, `ROOT_FOLDER_ID`, `AUTH_MODE`,
 `MAX_BYTES`, `MAX_CHARS`, `SCOPE_CACHE_TTL`, `ALLOWLIST_CACHE_TTL`. Without Redis an in-memory store is used for
 local development and tests; when `VERCEL` is set and Redis is missing, the app serves only `/health` (503,
 `store_error: redis_not_configured`) and setup errors for `/mcp` and the dashboard.
@@ -214,21 +215,17 @@ local development and tests; when `VERCEL` is set and Redis is missing, the app 
 
 ### Follow-ups (same PR)
 
-- **Same-account mode:** if `BOT_EMAIL` is unset or equals `OWNER_EMAIL` (case-insensitive), the tools use the
-  owner's stored refresh token (`GOOGLE_OAUTH_REFRESH_TOKEN` still wins), grant/revoke/approve only change the
-  allowlist (no permission calls), `/connect-bot` is not needed and refuses bot flows. The allowlist and scope
-  guard are the only boundary. The overview, access and bot pages show a warning recommending a separate bot.
-  The owner's My Drive root can't be granted in either mode.
-- **Switching to a bot:** allowlist entries record `shared_with` (the bot address their `permission_id` belongs
-  to). `POST /access/share-bot` (CSRF, bot connected) runs `permissions.create` for every entry not yet shared
-  with the current bot, stores the new ids, removes a share left for an earlier bot address (best effort), and
-  reports failures; running it again does nothing.
+- **One account:** tools use each person's stored sign-in (`GOOGLE_OAUTH_REFRESH_TOKEN` still wins for the
+  admin). Grant, revoke and approve only change the allowlist. There is no `/connect-bot`. The allowlist and
+  scope guard are the only boundary. The owner's My Drive root can't be granted.
+- **Older shares:** an allowlist entry may still record `shared_with` and `permission_id` from a previous bot.
+  Revoke deletes that permission. New ticks do not create one.
 - **Parents in tool output** are filtered to ids that are allowlisted or inside an allowlisted item
   (`ScopeGuard.parent_in_scope`, memoised per call); the key is dropped when nothing remains.
 - **`GET`/`DELETE /mcp`** return 405 with `Allow: POST` before a session manager is created (a GET with
   `Accept: text/event-stream` used to hang until the platform timeout).
-- **Tests** generate keys and tokens at runtime; the phase-1 scope/service/policy/app suites run in both modes
-  (owner view; bot view that only sees what is shared with it).
+- **Tests** generate keys and tokens at runtime; the phase-1 scope/service/policy/app suites run against the
+  signed-in user's Drive view. The allowlist is what keeps a file out.
 
 ### Phase-1 risks re-checked
 
@@ -242,7 +239,7 @@ local development and tests; when `VERCEL` is set and Redis is missing, the app 
 
 ### Verification
 
-- `pytest` (no network): fake Drive with owner and bot views, in-memory store, fake OAuth. Covers grant/revoke,
+- `pytest` (no network): fake Drive as the signed-in user, in-memory store, fake OAuth. Covers grant/revoke,
   nested scope, revocation timing, access_required shape and dedupe, approve/deny, the two request tools, owner
   and bot sign-in restrictions, CSRF, credential separation, shortcuts and parents.
 - Local uvicorn smoke test: logged-out pages redirect to `/login`, `/mcp` rejects missing tokens and the

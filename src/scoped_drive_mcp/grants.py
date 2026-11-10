@@ -1,12 +1,8 @@
-"""Owner-side grant and revoke ("bot share" + server allowlist).
+"""Owner-side grant and revoke (server allowlist).
 
-In separate-bot mode, granting an item shares it with BOT_EMAIL as writer using the OWNER's
-credentials (no notification email) and stores the returned permission id in the allowlist.
-Revoking removes the allowlist entry first (the server stops serving it within
-ALLOWLIST_CACHE_TTL seconds) and then deletes that permission, so Google stops the bot too.
-
-In same-account mode (`bot_email=None`) there is nobody to share with: grant and revoke only
-change the allowlist, which is then the only boundary.
+Grant and revoke change the allowlist. The dashboard never passes a bot address, so a tick
+does not create a Drive permission. Revoke still deletes a permission id already stored on
+an older entry.
 """
 
 from collections.abc import Callable

@@ -3,23 +3,12 @@
 {% block content %}
 <h1>What the assistant can use</h1>
 {% include "_mode.html" %}
-{% if mode == "same_account" %}
 <p class="muted">Each item below is on your list. Folders include everything inside them.
-  Remove takes the item off that list.</p>
-{% else %}
-<p class="muted">Each item below is shared with the second Gmail and on your list.
-  Folders include everything inside them. Remove takes both away.</p>
-{% if unshared_ids %}
-<div class="warn">{{ unshared_ids | length }} item(s) are on your list but not shared with
-  <code>{{ bot_email }}</code> in Drive (for example, allowed before that account was connected).
-  <form class="inline" method="post" action="/access/share-bot">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="primary" type="submit">Share all allowed items with the bot</button>
-  </form>
-</div>
-{% elif not bot.connected %}
-<div class="warn">The second Gmail is not connected. <a href="/connect-bot">Connect it</a> first.</div>
-{% endif %}
+  Remove takes the item off that list. If it was shared with an older bot account, that
+  Drive share is removed too.</p>
+{% if not bot.connected %}
+<div class="warn">Your Google sign-in is not stored yet, so the assistant cannot reach Drive.
+  Sign out and sign in again.</div>
 {% endif %}
 <div class="scroll-x">
 <table>
@@ -36,7 +25,7 @@
     <td>{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/browse?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td class="muted">{{ describe_mime(e.mime_type) }}</td>
     <td class="muted">{{ e.granted_at }}</td>
-    <td class="muted">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">request</a>{% else %}dashboard{% endif %}{% if e.id in unshared_ids %} <span class="pill pending">not shared with bot</span>{% endif %}</td>
+    <td class="muted">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">request</a>{% else %}dashboard{% endif %}</td>
     <td style="text-align:right">
       <form class="inline" method="post" action="/revoke" data-confirm="Remove this from the assistant?">
         <input type="hidden" name="csrf" value="{{ csrf }}">

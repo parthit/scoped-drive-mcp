@@ -11,17 +11,15 @@
      the assistant you connect, are the features of the app.</p>
   <p>This deployment is run by the person who set it up. Any verified Google account can
      sign in, unless that person limited sign-in to a list of addresses. You sign in with
-     your own Google account, tick your own files, and connect a second Gmail that the
-     assistant acts as. Each person’s files stay separate. The support email shown on the
+     your own Google account and tick your own files. The assistant uses that same account.
+     Each person’s files stay separate. The support email shown on the
      Google sign-in screen is the contact for this app.</p>
 
   <h2>Google data we access</h2>
   <p>Sign-in requests these Google permissions, and no others:</p>
   <ul>
     <li><code>openid</code> and <code>email</code>, to read the account’s email address and
-        whether Google has verified it. We use that to tell signed-in people apart, and,
-        when you connect a second Gmail for the assistant, to check that it is a different
-        account.</li>
+        whether Google has verified it. We use that to tell signed-in people apart.</li>
     <li><code>https://www.googleapis.com/auth/drive</code>, which can see, create, edit,
         and trash files in that account’s Drive. A narrower
         <code>drive.file</code> scope only covers files this app created or that you pick
@@ -33,8 +31,7 @@
   <p>What an assistant can do depends on the role of the connection you gave it: search,
      reading text, creating files and folders, editing, renaming, and moving an item to
      Drive’s trash. This app has no tool to permanently delete a file, to change who a
-     file is shared with, or to move a file between folders. Sharing an item with the bot
-     account, when you use one, is done by you from the dashboard.</p>
+     file is shared with, or to move a file between folders.</p>
 
   <h2>How we use it</h2>
   <p>Google user data is used only to provide the features on the home page and in the
@@ -45,10 +42,9 @@
     <li>Check each assistant request against that list.</li>
     <li>Call Drive for an allowed item and return the result to the assistant you connected.</li>
   </ul>
-  <p>In the usual setup, a second Google account (the bot) is the identity those calls use.
-     Ticking an item shares that item with the bot in Drive. The bot cannot see the rest
-     of your Drive. You can instead run in same-account mode, where the calls use your own
-     sign-in and this server’s list is the limit. The dashboard shows which mode is on.</p>
+  <p>Those Drive calls use the Google account you signed in with. Ticking an item adds it to
+     this server’s list. That list is the limit: Google does not hide the rest of your Drive
+     from this sign-in.</p>
   <p>File contents are read from Drive only to answer that request. This server does not
      keep a copy, does not build a database of your files, and does not write contents,
      file names, or search text to the activity log.</p>
@@ -60,8 +56,8 @@
         this deployment uses.</li>
     <li>The allowlist: the Drive file and folder ids you ticked.</li>
     <li>Access requests, kept for 7 days: a request id, the file id, a short description,
-        the tool name, the connection name, your decision, and the file name only when the
-        bot can already see that file.</li>
+        the tool name, the connection name, your decision, and the file name only when your
+        sign-in can already see that file.</li>
     <li>An activity log of the last 500 events: time, tool name, allow or deny, and ids.
         The same lines go to the host’s logs. They do not include file contents.</li>
     <li>A signed session cookie in your browser for about 8 hours. Signing out deletes
@@ -100,12 +96,10 @@
 
   <h2>Manage or delete your data</h2>
   <ul>
-    <li>Untick an item in the dashboard to remove it from the allowlist. In the separate-bot
-        setup, that also removes the bot’s share on that item.</li>
+    <li>Untick an item in the dashboard to remove it from the allowlist. If that item was
+        shared with an older assistant account, the share is removed too.</li>
     <li>Disconnect an assistant on the dashboard overview. That deletes the tokens stored
         for that connection.</li>
-    <li>Remove the stored bot connection on the bot page. That deletes the bot’s refresh
-        token from this server.</li>
     <li>Remove Scoped Drive at
         <a href="https://myaccount.google.com/permissions">Google Account permissions</a>.
         Google then stops accepting this app’s sign-in, so the stored refresh token can

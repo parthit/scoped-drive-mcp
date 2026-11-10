@@ -64,15 +64,11 @@ def test_depth_cap(drive, clock) -> None:
     assert deep.assert_in_scope("chain-leaf").id == "chain-leaf"
 
 
-def test_parent_moved_outside_forbidden_after_ttl(drive, guard: ScopeGuard, clock, mode) -> None:
+def test_parent_moved_outside_forbidden_after_ttl(drive, guard: ScopeGuard, clock) -> None:
     assert guard.is_in_scope("doc-deep")
     drive.move("sub-a-deep", ["outside-folder"])
-    if mode == "separate_bot":
-        # Google itself stops the bot at once: the file is no longer under a shared folder.
-        assert not guard.is_in_scope("doc-deep")
-    else:
-        # ancestor lookups are cached, so the move is only noticed after the TTL
-        assert guard.is_in_scope("doc-deep")
+    # ancestor lookups are cached, so the move is only noticed after the TTL
+    assert guard.is_in_scope("doc-deep")
     clock.advance(61)
     assert not guard.is_in_scope("doc-deep")
     with pytest.raises(ForbiddenError):

@@ -37,7 +37,6 @@ from .bridge import Mailbox, MailboxError
 from .config import Settings
 from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
 from .drive_client import (
-    BOT_NOT_CONNECTED,
     OWNER_NOT_SIGNED_IN,
     BotNotConnectedError,
     DriveClient,
@@ -482,31 +481,29 @@ def build_app(
     activity = ActivityLog(actor_kv)
     audit_module.set_sinks([activity])
 
-    def stored_bot_token() -> str | None:
-        # Admin same-account mode: the tools act as the owner, limited only by the allowlist.
+    def stored_owner_token() -> str | None:
+        # Tools act as the signed-in user, limited only by the allowlist.
         # The actor is the admin here; other people never use this client.
         if not vault.enabled:
             return None
-        record = vault.owner() if settings.same_account else vault.bot()
+        record = vault.owner()
         return record.get("t") if record else None
 
-    def user_bot_token(email: str) -> str | None:
-        record = directory.vault_for(email).bot()
+    def user_owner_token(email: str) -> str | None:
+        record = directory.vault_for(email).owner()
         return record.get("t") if record else None
 
     if drive_client is None:
         drive_client = LazyBotDriveClient(
             settings.env_bot_refresh_token,
-            stored_bot_token,
+            stored_owner_token,
             bot_drive_factory or _bot_factory(settings),
-            not_connected_message=(
-                OWNER_NOT_SIGNED_IN if settings.same_account else BOT_NOT_CONNECTED
-            ),
+            not_connected_message=OWNER_NOT_SIGNED_IN,
         )
     routed = RoutingDriveClient(
         drive_client,
         settings.owner_email,
-        user_bot_token,
+        user_owner_token,
         bot_drive_factory or _bot_factory(settings),
     )
 

@@ -85,12 +85,6 @@ SECURITY_HEADERS = [
 ]
 
 
-NO_BOT_MESSAGE = (
-    "There is no separate bot account (BOT_EMAIL is unset or equals OWNER_EMAIL), so the "
-    "assistant uses your own sign-in. Set BOT_EMAIL to a different account to use a bot."
-)
-
-
 class OwnerNotConnectedError(Exception):
     """No stored refresh token for the owner (sign in again)."""
 
@@ -119,19 +113,6 @@ class DashboardContext:
         actor = current_actor.get()
         return not actor or actor == self.settings.owner_email
 
-    def acting_bot_email(self) -> str | None:
-        """Who a tick should be shared with. New users have no same-account mode."""
-        if self._admin_actor():
-            if self.settings.same_account:
-                return None
-            return self.settings.bot_email
-        if not self.vault.enabled:
-            return None
-        record = self.vault.bot()
-        if record and record.get("t"):
-            return record.get("email")
-        return None
-
     def owner_drive(self) -> OwnerDriveClient:
         record = self.vault.owner()
         if not record or not record.get("t"):
@@ -148,27 +129,15 @@ class DashboardContext:
             self.owner_drive,
             self.allowlist,
             self.requests,
-            self.acting_bot_email(),
+            None,
             on_change=self.on_allowlist_change,
         )
-
-    def view_mode(self) -> str:
-        if not self._admin_actor():
-            return "separate_bot"
-        return self.settings.mode
 
     def visible_root_folder_id(self) -> str | None:
         """The deployment root is the admin's folder. Other people do not see its id."""
         if self._admin_actor():
             return self.settings.root_folder_id
         return None
-
-    def view_bot_email(self) -> str | None:
-        if self._admin_actor():
-            if self.settings.same_account:
-                return self.settings.owner_email
-            return self.settings.bot_email
-        return self.acting_bot_email()
 
     def forget_drive(self, email: str | None = None) -> None:
         if isinstance(self.bot_drive, LazyBotDriveClient) and (
@@ -181,17 +150,10 @@ class DashboardContext:
     def bot_status(self) -> dict[str, Any]:
         """Which Google account the MCP tools act as, and where its token comes from."""
         if self._admin_actor() and self.settings.env_bot_refresh_token:
-            same = self.settings.same_account
-            email = self.settings.owner_email if same else self.settings.bot_email
-            return {"connected": True, "source": "env", "email": email}
-        if self._admin_actor() and self.settings.same_account:
-            record = self.vault.owner() if self.vault.enabled else None
-            if record and record.get("t"):
-                return {"connected": True, "source": "owner", "email": record.get("email")}
-            return {"connected": False, "source": None, "email": None}
-        record = self.vault.bot() if self.vault.enabled else None
+            return {"connected": True, "source": "env", "email": self.settings.owner_email}
+        record = self.vault.owner() if self.vault.enabled else None
         if record and record.get("t"):
-            return {"connected": True, "source": "dashboard", "email": record.get("email")}
+            return {"connected": True, "source": "owner", "email": record.get("email")}
         return {"connected": False, "source": None, "email": None}
 
     def owner_connected(self) -> bool:
@@ -400,36 +362,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         request.session["oauth_next"] = safe_next(request.query_params.get("next"))
         return start_oauth(request, "owner", settings.owner_email)
 
-    def _refuse_bot(user: str, bot: str, verified: bool) -> str | None:
-        """Why this Google account cannot be connected as `user`'s bot, or None."""
-        if user == settings.owner_email and not settings.same_account:
-            if not verified or bot != settings.bot_email:
-                return (
-                    f"You signed in as {bot or 'an unknown account'}, but the bot account is "
-                    f"{settings.bot_email}. Sign in as the bot and try again."
-                )
-        elif not verified:
-            return "This Google account is not allowed to use this dashboard."
-        if not bot or bot == user:
-            return (
-                "The bot must be a different Google account from the one you use to sign in. "
-                "Create a second Gmail for the assistant and connect that."
-            )
-        reserved = None
-        if settings.bot_email and settings.bot_email != settings.owner_email:
-            reserved = settings.bot_email
-        if ctx.directory is not None and ctx.directory.email_in_use(
-            bot, except_user=user, reserved_bot=reserved
-        ):
-            return "That Google account is already used by someone else on this server."
-        current = ctx.directory.stored_bot_email(user) if ctx.directory is not None else None
-        if current and current != bot:
-            return (
-                "This dashboard is already connected to a different bot account. "
-                "Disconnect it before connecting another."
-            )
-        return None
-
     async def auth_callback(request: Request) -> Response:
         params = request.query_params
         if params.get("error"):
@@ -445,14 +377,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             or not hmac.compare_digest(str(nonce), str(data.get("nonce", "")))
         ):
             return render(request, "error.html", 400, message="Sign-in expired. Try again.")
-        flow = data.get("flow")
-        if flow not in ("owner", "bot"):
+        if data.get("flow") != "owner":
             return render(request, "error.html", 400, message="Invalid sign-in state.")
-        session_email = session_user(request)
-        if flow == "bot" and not session_email:
-            return render(request, "error.html", 403, message="Sign in first.")
-        if flow == "bot" and settings.same_account and session_email == settings.owner_email:
-            return render(request, "error.html", 400, message=NO_BOT_MESSAGE)
         code = params.get("code")
         if not code:
             return render(request, "error.html", 400, message="Google did not return a code.")
@@ -465,22 +391,15 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
         email = str(info.get("email", "")).strip().lower()
         verified = info.get("email_verified") in (True, "true")
-        action = "login" if flow == "owner" else "connect_bot"
-        if flow == "owner" and (not verified or not settings.sign_in_allowed(email)):
+        if not verified or not settings.sign_in_allowed(email):
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
-            audit_owner(action, "deny", reason="wrong_account")
+            audit_owner("login", "deny", reason="wrong_account")
             return render(
                 request,
                 "error.html",
                 403,
                 message="This Google account is not allowed to use this dashboard.",
             )
-        if flow == "bot":
-            refusal = _refuse_bot(session_email or "", email, verified)
-            if refusal is not None:
-                await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
-                audit_owner(action, "deny", reason="wrong_account")
-                return render(request, "error.html", 403, message=refusal)
         if DRIVE_SCOPE not in tokens.scopes:
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             return render(
@@ -499,68 +418,25 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
                 "myaccount.google.com/permissions and try again.",
             )
 
-        if flow == "owner":
-            reset = current_actor.set(email)
-            try:
-                await blocking(ctx.vault.set_owner, tokens.refresh_token, email)
-                if ctx.directory is not None:
-                    await blocking(ctx.directory.remember_user, email)
-            finally:
-                current_actor.reset(reset)
-            next_url = safe_next(request.session.get("oauth_next"))
-            request.session.clear()
-            request.session["owner"] = email
-            request.session["csrf"] = secrets.token_urlsafe(32)
-            if settings.same_account and email == settings.owner_email:
-                ctx.forget_drive(email)
-            audit_owner("login")
-            return RedirectResponse(next_url, status_code=303)
-
-        assert session_email is not None
-        reset = current_actor.set(session_email)
+        reset = current_actor.set(email)
         try:
-            await blocking(ctx.vault.set_bot, tokens.refresh_token, email)
+            await blocking(ctx.vault.set_owner, tokens.refresh_token, email)
+            if ctx.directory is not None:
+                await blocking(ctx.directory.remember_user, email)
         finally:
             current_actor.reset(reset)
-        ctx.forget_drive(session_email)
-        audit_owner("connect_bot")
-        note = ""
-        if settings.env_bot_refresh_token:
-            note = " (GOOGLE_OAUTH_REFRESH_TOKEN is also set and takes precedence.)"
-        flash(request, "ok", f"Bot account {email} connected.{note}")
-        return RedirectResponse("/", status_code=303)
+        next_url = safe_next(request.session.get("oauth_next"))
+        request.session.clear()
+        request.session["owner"] = email
+        request.session["csrf"] = secrets.token_urlsafe(32)
+        ctx.forget_drive(email)
+        audit_owner("login")
+        return RedirectResponse(next_url, status_code=303)
 
     async def logout(request: Request, form: dict[str, str]) -> Response:
         audit_owner("logout")
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
-
-    async def connect_bot_page(request: Request) -> Response:
-        status = await blocking(ctx.bot_status)
-        return render(
-            request,
-            "connect_bot.html",
-            bot=status,
-            bot_email=ctx.view_bot_email(),
-            mode=ctx.view_mode(),
-        )
-
-    async def connect_bot_start(request: Request, form: dict[str, str]) -> Response:
-        if ctx.view_mode() == "same_account":
-            flash(request, "error", NO_BOT_MESSAGE)
-            return RedirectResponse("/connect-bot", status_code=303)
-        user = current_actor.get()
-        hint = ctx.view_bot_email()
-        if user and user != settings.owner_email and ctx.directory is not None:
-            hint = ctx.directory.stored_bot_email(user)
-        return start_oauth(request, "bot", hint)
-
-    async def bot_disconnect(request: Request, form: dict[str, str]) -> Response:
-        await blocking(ctx.vault.clear_bot)
-        ctx.forget_drive(current_actor.get())
-        audit_owner("disconnect_bot")
-        flash(request, "ok", "Stored bot connection removed.")
-        return RedirectResponse("/connect-bot", status_code=303)
 
     # ---- pages -----------------------------------------------------------
 
@@ -583,7 +459,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return {
                 "bot": bot,
                 "owner_connected": ctx.owner_connected(),
-                "unshared_count": len(ctx.grants().unshared()) if bot["connected"] else 0,
                 "allow_count": len(entries),
                 "grants": (
                     ctx.mcp_oauth.list_grants(current_actor.get()) if ctx.mcp_oauth else []
@@ -598,8 +473,6 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             store_kind=getattr(ctx.store, "kind", "custom"),
             root_folder_id=ctx.visible_root_folder_id(),
             mcp_url=f"{settings.app_base_url}/mcp",
-            mode=ctx.view_mode(),
-            bot_email=ctx.view_bot_email(),
             **data,
         )
 
@@ -711,9 +584,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
 
     async def access(request: Request) -> Response:
         def gather() -> dict[str, Any]:
-            bot = ctx.bot_status()
-            unshared = ctx.grants().unshared() if bot["connected"] else []
-            return {"entries": ctx.allowlist.entries(), "bot": bot, "unshared": unshared}
+            return {"entries": ctx.allowlist.entries(), "bot": ctx.bot_status()}
 
         data = await blocking(gather)
         rows = sorted(data["entries"].values(), key=lambda e: e.granted_at, reverse=True)
@@ -723,33 +594,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             rows=rows,
             root_folder_id=ctx.visible_root_folder_id(),
             describe_mime=describe_mime,
-            mode=ctx.view_mode(),
             bot=data["bot"],
-            bot_email=ctx.view_bot_email(),
-            unshared_ids={e.id for e in data["unshared"]},
         )
-
-    async def share_all_with_bot(request: Request, form: dict[str, str]) -> Response:
-        if ctx.view_mode() == "same_account":
-            flash(request, "error", NO_BOT_MESSAGE)
-            return RedirectResponse("/access", status_code=303)
-        bot = await blocking(ctx.bot_status)
-        if not bot["connected"]:
-            flash(request, "error", "Connect the bot account first.")
-            return RedirectResponse("/connect-bot", status_code=303)
-        try:
-            result = await blocking(ctx.grants().share_all)
-        except GrantError as exc:
-            flash(request, "error", str(exc))
-            return RedirectResponse("/access", status_code=303)
-        shared, failed = result["shared"], result["failed"]
-        if failed:
-            names = ", ".join(f["name"] or f["id"] for f in failed[:5])
-            flash(request, "error", f"Could not share {len(failed)} item(s) with the bot: {names}.")
-        if shared or not failed:
-            who = bot.get("email") or ctx.view_bot_email() or "the bot"
-            flash(request, "ok", f"Shared {len(shared)} item(s) with {who}.")
-        return RedirectResponse("/access", status_code=303)
 
     async def requests_page(request: Request) -> Response:
         reqs = await blocking(ctx.requests.recent, 100)
@@ -829,18 +675,11 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return []
         rows: list[dict[str, Any]] = []
         for person in ctx.directory.known_users():
-            saved = current_actor.set(person)
-            try:
-                bot = ctx.bot_status()
-            finally:
-                current_actor.reset(saved)
             grants = ctx.mcp_oauth.list_grants(person) if ctx.mcp_oauth else []
             rows.append(
                 {
                     "email": person,
                     "created_at": ctx.directory.created_at(person),
-                    "bot_connected": bot["connected"],
-                    "bot_email": bot["email"] if bot["connected"] else None,
                     "grants": grants,
                 }
             )
@@ -1026,14 +865,10 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/auth/callback", auth_callback, methods=["GET"]),
         Route("/logout", csrf_protected(logout), methods=["POST"]),
         Route("/", home, methods=["GET"]),
-        Route("/connect-bot", owner_only(connect_bot_page), methods=["GET"]),
-        Route("/connect-bot", csrf_protected(connect_bot_start), methods=["POST"]),
-        Route("/bot/disconnect", csrf_protected(bot_disconnect), methods=["POST"]),
         Route("/browse", owner_only(browse), methods=["GET"]),
         Route("/grant", csrf_protected(grant), methods=["POST"]),
         Route("/revoke", csrf_protected(revoke), methods=["POST"]),
         Route("/access", owner_only(access), methods=["GET"]),
-        Route("/access/share-bot", csrf_protected(share_all_with_bot), methods=["POST"]),
         Route("/requests", owner_only(requests_page), methods=["GET"]),
         Route("/requests/{rid}", owner_only(request_detail), methods=["GET"]),
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),

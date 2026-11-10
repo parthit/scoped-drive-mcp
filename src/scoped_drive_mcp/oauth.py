@@ -1,4 +1,4 @@
-"""Google OAuth 2.0 authorization-code flow for the dashboard (owner sign-in and /connect-bot).
+"""Google OAuth 2.0 authorization-code flow for dashboard sign-in.
 
 One "Web application" OAuth client serves both flows; the redirect URI is always
 APP_BASE_URL/auth/callback and the flow is carried in a signed `state`.
