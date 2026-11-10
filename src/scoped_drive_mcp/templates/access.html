@@ -4,30 +4,31 @@
 <h1>What the assistant can use</h1>
 {% include "_mode.html" %}
 {% if mode == "same_account" %}
-<p class="muted">Each item below is on the server's allowlist. Folders include everything inside them.
-  Revoking removes the item from the allowlist.</p>
+<p class="muted">Each item below is on your list. Folders include everything inside them.
+  Remove takes the item off that list.</p>
 {% else %}
-<p class="muted">Each item below is shared with the bot account and on the server's allowlist.
-  Shared folders include everything inside them. Revoking removes both.</p>
+<p class="muted">Each item below is shared with the second Gmail and on your list.
+  Folders include everything inside them. Remove takes both away.</p>
 {% if unshared_ids %}
-<div class="warn">{{ unshared_ids | length }} item(s) are on the allowlist but not shared with
-  <code>{{ bot_email }}</code> in Drive (for example, ticked before the bot was set up).
+<div class="warn">{{ unshared_ids | length }} item(s) are on your list but not shared with
+  <code>{{ bot_email }}</code> in Drive (for example, allowed before that account was connected).
   <form class="inline" method="post" action="/access/share-bot">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="primary" type="submit">Share all allowed items with the bot</button>
   </form>
 </div>
 {% elif not bot.connected %}
-<div class="warn">The bot is not connected. <a href="/connect-bot">Connect it</a> first.</div>
+<div class="warn">The second Gmail is not connected. <a href="/connect-bot">Connect it</a> first.</div>
 {% endif %}
 {% endif %}
+<div class="scroll-x">
 <table>
   <thead><tr><th>Name</th><th>Type</th><th>Granted</th><th>Via</th><th></th></tr></thead>
   <tbody>
   {% if root_folder_id %}
   <tr>
     <td><code>{{ root_folder_id }}</code></td><td class="muted">Folder</td><td class="muted">—</td>
-    <td class="muted">ROOT_FOLDER_ID env var</td><td class="muted" style="text-align:right">change in Vercel</td>
+    <td class="muted">set on the server</td><td class="muted" style="text-align:right">server setting</td>
   </tr>
   {% endif %}
   {% for e in rows %}
@@ -37,17 +38,18 @@
     <td class="muted">{{ e.granted_at }}</td>
     <td class="muted">{% if e.request_id %}<a href="/requests/{{ e.request_id }}">request</a>{% else %}dashboard{% endif %}{% if e.id in unshared_ids %} <span class="pill pending">not shared with bot</span>{% endif %}</td>
     <td style="text-align:right">
-      <form class="inline" method="post" action="/revoke">
+      <form class="inline" method="post" action="/revoke" data-confirm="Remove this from the assistant?">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="file_id" value="{{ e.id }}">
         <input type="hidden" name="next" value="/access">
-        <button class="danger" type="submit">Revoke</button>
+        <button class="danger" type="submit">Remove</button>
       </form>
     </td>
   </tr>
   {% else %}
-  {% if not root_folder_id %}<tr><td colspan="5" class="muted">Nothing is shared yet. <a href="/browse">Browse your Drive</a> to grant items.</td></tr>{% endif %}
+  {% if not root_folder_id %}<tr><td colspan="5" class="muted">Nothing is allowed yet. <a href="/browse">Browse your Drive</a> and click Allow.</td></tr>{% endif %}
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

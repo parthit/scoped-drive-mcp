@@ -3,19 +3,15 @@
 {% block content %}
 <div class="card" style="max-width:640px">
   <h1>Allow {{ client_name }}?</h1>
-  <p><b>{{ client_name }}</b> wants to connect to this Drive server.</p>
-  <p>Scope: <code>{{ scope }}</code>. Allowing it lets the app call these tools
-    (the same set as an admin token) on the items you have ticked:</p>
-  <ul>
-    {% for tool in tools %}
-    <li><code>{{ tool }}</code></li>
-    {% endfor %}
-  </ul>
+  <p><b>{{ client_name }}</b> wants to connect to your Drive through this server.</p>
+  <p>On the items you have ticked, it can search, read, create, edit, and rename.
+     It can also move those items to Drive trash. Trash is recoverable for 30 days.</p>
+  <p>It cannot see the rest of your Drive, change who a file is shared with, or permanently delete a file.</p>
   {% if requested_scope and requested_scope != scope %}
-  <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server grants <code>{{ scope }}</code>.</p>
+  <p class="muted">The app asked for <code>{{ requested_scope }}</code>. This server still only grants access to the items you have ticked.</p>
   {% endif %}
-  <p class="muted">After you choose, the browser returns to <code>{{ redirect_uri }}</code>.
-    Unticked files stay blocked. You can disconnect the app later from the overview page.</p>
+  <p class="muted">After you choose, you’ll return to {{ client_name }}.
+     You can disconnect the app later from the overview page.</p>
   <form method="post" action="/oauth/authorize">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="primary" type="submit" name="decision" value="allow">Allow</button>

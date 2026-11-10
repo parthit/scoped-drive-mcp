@@ -185,6 +185,7 @@ Do this signed in to <https://console.cloud.google.com/> with **your own** accou
 | `GOOGLE_OAUTH_CLIENT_ID` | yes | step 1.4 |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | step 1.4 |
 | `OWNER_EMAIL` | yes | the admin's Google address (the only account that can open `/admin`; other people can sign in too) |
+| `ALLOWED_EMAILS` | no | comma-separated Google addresses allowed to sign in. Leave unset and any verified Google account can sign in. `OWNER_EMAIL` is always allowed |
 | `BOT_EMAIL` | recommended | the bot Gmail address; leave empty for [same-account mode](#two-modes-separate-bot-or-same-account) |
 | `APP_BASE_URL` | yes | your Vercel domain, e.g. `https://scoped-drive-mcp.vercel.app` (no trailing `/`) |
 | `SESSION_SECRET` | yes | step 2.3 |
@@ -214,7 +215,9 @@ Preview deployments are usually behind Vercel's login, so use the production URL
 ### 4. Sign in as the owner, then connect the bot
 
 1. Open `https://<project>.vercel.app/` and click **Sign in with Google**. Choose **your own** account, accept
-   the unverified-app warning and allow Drive access. Any other account is rejected.
+   the unverified-app warning and allow Drive access. Other people sign in with their own Google accounts.
+   Each person ticks their own files and connects their own second Gmail. Only `OWNER_EMAIL` can open
+   `/admin`. If `ALLOWED_EMAILS` is set, any address not on that list is rejected.
 2. Click **Bot** in the top menu → **Connect bot**. On Google's page **switch to the bot account** (use "Use
    another account" if needed) and allow Drive access. If you pick any account other than `BOT_EMAIL`, it is
    rejected and nothing is stored. The overview should now show both accounts as connected.
@@ -229,7 +232,7 @@ Both sign-ins are stored in Redis, encrypted with `ENCRYPTION_KEY`. (Prefer the 
 
 1. In your own Google Drive, make a folder `Grok test` with a Google Doc inside (e.g. "Test plan" with a sentence
    in it). Put a second doc **outside** it, e.g. "Private note" in My Drive.
-2. In the dashboard, click **Browse**, find `Grok test` and click **Grant**. It now shows **shared**, and
+2. In the dashboard, click **Browse**, find `Grok test` and click **Allow**. It now shows **allowed**, and
    **Access** lists it. (Behind the scenes the folder is shared with the bot as Editor, without an email. In
    same-account mode nothing changes in Drive; it is only added to the allowlist.)
 
@@ -528,10 +531,12 @@ After changing dependencies, regenerate Vercel's requirements file:
   bot can't see (sharing removed in Drive) is refused too.
 - **Revoking** removes the allowlist entry first (every server instance re-reads the allowlist at least every
   `ALLOWLIST_CACHE_TTL` seconds, default 2) and then deletes the bot's permission in Drive.
-- **Dashboard sign-in** is Google OAuth restricted to `OWNER_EMAIL` (verified email only), with a signed,
-  httponly, Secure, SameSite=Lax cookie (8 hours), a CSRF token on every form, a same-origin check, and strict
-  security headers. `/connect-bot` only accepts `BOT_EMAIL`. The MCP bearer tokens don't work on the dashboard,
-  and the dashboard cookie doesn't work on `/mcp`.
+- **Dashboard sign-in** is Google OAuth for any verified Google account, or only the addresses in
+  `ALLOWED_EMAILS` when that is set (`OWNER_EMAIL` is always allowed). `OWNER_EMAIL` is the admin and the only
+  account that can open `/admin`. The session is a signed, httponly, Secure, SameSite=Lax cookie (8 hours),
+  with a CSRF token on every form, a same-origin check, and strict security headers. For the admin,
+  `/connect-bot` only accepts `BOT_EMAIL`. Other people connect a second Gmail that is not already in use.
+  The MCP bearer tokens don't work on the dashboard, and the dashboard cookie doesn't work on `/mcp`.
 - **Stored secrets:** the owner's and bot's refresh tokens are encrypted with `ENCRYPTION_KEY` (Fernet) before
   they go into Redis. Anyone with `ENCRYPTION_KEY` *and* Redis access could use them, so keep both private.
   The owner token has full Drive scope because sharing needs it. In separate-bot mode it's only used by the
@@ -540,7 +545,7 @@ After changing dependencies, regenerate Vercel's requirements file:
   so Grok never learns the ids of your other folders.
 - **`/mcp` only accepts POST.** The server is stateless, so `GET` (an SSE stream) and `DELETE` (ending a
   session) answer `405` with `Allow: POST` instead of holding the connection open.
-- **Access requests** have 192-bit random IDs, expire after 7 days, and only the owner can open them. A pending
+- **Access requests** have 192-bit random IDs, expire after 7 days, and only the person they belong to can open them. A pending
   request for the same file is reused rather than duplicated.
 - **Sharing is inherited.** Anything placed inside a shared folder, by you or anyone else with access, becomes
   visible to Grok. Moving a file *out* removes access: immediately for the file itself, and within

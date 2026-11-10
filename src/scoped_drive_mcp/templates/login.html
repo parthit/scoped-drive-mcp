@@ -3,10 +3,11 @@
 {% block content %}
 <div class="card" style="max-width:520px;margin:40px auto;">
   <h1>Sign in to Scoped Drive</h1>
-  <p>Only the owner’s Google account can sign in to this deployment.</p>
+  <p>Sign in with your own Google account. You tick your own files, and you connect a
+     second Gmail for the assistant to use. Each person’s files stay separate.</p>
   <p>Scoped Drive will ask Google for:</p>
   <ul>
-    <li>Your email address, to confirm this is the owner account.</li>
+    <li>Your email address, so this server knows which list of files is yours.</li>
     <li>Full access to Google Drive (<code>https://www.googleapis.com/auth/drive</code>).
         Drive cannot limit an app to selected files and folders, so Scoped Drive uses
         that access only to enforce the list you tick and to let an assistant you connect
