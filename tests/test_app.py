@@ -85,7 +85,7 @@ async def _initialize(client, role: str) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("role", "count"), [("viewer", 6), ("editor", 11), ("admin", 12)])
+@pytest.mark.parametrize(("role", "count"), [("viewer", 14), ("editor", 19), ("admin", 20)])
 async def test_initialize_and_list_tools(client, role: str, count: int) -> None:
     await _initialize(client, role)
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth(role))
@@ -122,7 +122,7 @@ async def test_tool_calls_over_http(client) -> None:
 async def test_principal_does_not_leak_between_requests(client) -> None:
     await _initialize(client, "admin")
     r = await client.post("/mcp", json=rpc("tools/list"), headers=auth("viewer"))
-    assert len(r.json()["result"]["tools"]) == 6
+    assert len(r.json()["result"]["tools"]) == 14
 
 
 def test_starlette_testclient_with_lifespan(app) -> None:
@@ -134,7 +134,7 @@ def test_starlette_testclient_with_lifespan(app) -> None:
         r = tc.post("/mcp", json=INIT, headers=auth("editor"))
         assert r.status_code == 200
         r = tc.post("/mcp", json=rpc("tools/list"), headers=auth("editor"))
-        assert len(r.json()["result"]["tools"]) == 11
+        assert len(r.json()["result"]["tools"]) == 19
 
 
 @pytest.mark.anyio

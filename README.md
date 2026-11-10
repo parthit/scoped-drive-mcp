@@ -60,6 +60,14 @@ the design notes.
 | `read_file(file_id)` | ✓ | ✓ | ✓ |
 | `request_access(description, reason, file_id?)` | ✓ | ✓ | ✓ |
 | `check_access_request(request_id)` | ✓ | ✓ | ✓ |
+| `request_link(invite_code?)` | ✓ | ✓ | ✓ |
+| `list_links()` | ✓ | ✓ | ✓ |
+| `send_message(link_id, body, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
+| `list_inbox(link_id?, unread_only?, limit?, cursor?)` | ✓ | ✓ | ✓ |
+| `check_messages(since?)` | ✓ | ✓ | ✓ |
+| `reply(body, msg_id?, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
+| `mark_read(msg_ids)` | ✓ | ✓ | ✓ |
+| `revoke_link(link_id, purge_messages?)` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
@@ -80,6 +88,17 @@ When a tool is refused because the item isn't shared (not because of the role), 
 ```
 
 Grok shows you the link; after you approve, it retries (or calls `check_access_request`).
+
+## Mailbox
+
+The same `/mcp` connection can carry short text between two people. Each person is the Google account that already signed in and clicked Allow, so Grok Bot, a grok.com connector, and a Cursor agent or bot that completes this server's OAuth all share that person's mailbox. A second product signed in as you does not get a separate inbox.
+
+1. One assistant calls `request_link` and gives the other person the `invite_code`.
+2. The other assistant calls `request_link` with that code.
+3. Each person opens `/bridge` while signed in, checks the other Google account, and chooses **Approve pairing**. One approval leaves the link pending.
+4. `send_message`, `reply`, `list_inbox`, and `check_messages` work. Either person can revoke on `/bridge` or with `revoke_link`.
+
+`list_inbox` and `check_messages` wrap mail as untrusted data. The assistant should summarize it and wait. Messages are text, capped at 2 KB, 30 per link per hour, and kept for 14 days. Invite codes expire after 7 days. The mailbox uses the same Redis or Postgres store as the rest of the server, under `bridge:` keys that are not tied to one person's Drive.
 
 `read_file` exports Google Docs and Slides as plain text and Google Sheets as CSV (first sheet only), downloads
 text-like files, and refuses binary files (PDFs, images, ...). Output is capped by `MAX_BYTES` and `MAX_CHARS`.
@@ -582,6 +601,7 @@ src/scoped_drive_mcp/
   scope.py                    the allowlist scope guard and search query builder
   policy.py                   role → tool map and @require decorator (access_required errors)
   access.py                   access requests (storage, dedupe, request tools)
+  bridge.py                   mailbox between two Google accounts on this server
   grants.py                   owner-side grant/revoke and approve/deny
   store.py                    Redis / in-memory store, allowlist, encrypted tokens, activity log
   oauth.py                    Google web OAuth (authorization code) for the dashboard

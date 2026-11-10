@@ -26,6 +26,14 @@ VIEWER_TOOLS: frozenset[str] = frozenset(
         "read_file",
         "request_access",
         "check_access_request",
+        "request_link",
+        "list_links",
+        "send_message",
+        "list_inbox",
+        "check_messages",
+        "reply",
+        "mark_read",
+        "revoke_link",
     }
 )
 EDITOR_TOOLS: frozenset[str] = VIEWER_TOOLS | {

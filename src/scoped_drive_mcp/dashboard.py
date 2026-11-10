@@ -33,6 +33,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from .access import PENDING, AccessRequests
 from .audit import audit_owner
 from .auth import current_actor
+from .bridge import MailboxError
 from .config import Settings
 from .drive_client import (
     DRIVE_SCOPE,
@@ -110,6 +111,7 @@ class DashboardContext:
     mcp_oauth: McpOAuth | None = None
     directory: Any = None
     drive_router: Any = None
+    mailbox: Any = None
     _owner_clients: dict[str, tuple[str, OwnerDriveClient]] = field(
         default_factory=dict, repr=False
     )
@@ -944,6 +946,41 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             )
         return _completion_page(url)
 
+    async def bridge_page(request: Request) -> Response:
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="The mailbox is not configured.")
+        email = str(request.session.get("owner") or "")
+        data = await blocking(ctx.mailbox.list_links, email)
+        return render(request, "bridge.html", **data)
+
+    def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
+        email = str(request.session.get("owner") or "")
+        if action == "revoke":
+            ctx.mailbox.revoke(email, link_id, purge)
+            return "Pairing revoked. Both assistants have lost send and receive."
+        result = ctx.mailbox.decide(email, link_id, action)
+        if action == "deny" or result["status"] == "revoked":
+            return "Pairing denied. Neither assistant can send on it."
+        if result["status"] == "active":
+            return "You approved. The mailbox is on."
+        return "You approved. The mailbox stays off until the other person approves."
+
+    async def bridge_decide(request: Request, form: dict[str, str]) -> Response:
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="The mailbox is not configured.")
+        link_id = request.path_params["link_id"]
+        action = request.path_params["action"]
+        if action not in ("approve", "deny", "revoke"):
+            return render(request, "error.html", 404, message="That page is not available.")
+        purge = form.get("purge") == "on"
+        try:
+            message = await blocking(_bridge_act, request, link_id, action, purge)
+        except MailboxError as exc:
+            flash(request, "error", exc.message)
+        else:
+            flash(request, "ok", message)
+        return RedirectResponse("/bridge", status_code=303)
+
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
         grant_id = form.get("grant_id") or ""
         if ctx.mcp_oauth is None or not await blocking(
@@ -974,6 +1011,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/requests/{rid}/approve", csrf_protected(request_approve), methods=["POST"]),
         Route("/requests/{rid}/deny", csrf_protected(request_deny), methods=["POST"]),
         Route("/activity", owner_only(activity), methods=["GET"]),
+        Route("/bridge", owner_only(bridge_page), methods=["GET"]),
+        Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", admin_page, methods=["GET"]),
         Route("/oauth/authorize", oauth_authorize, methods=["GET"]),
         Route("/oauth/authorize", csrf_protected(oauth_decide), methods=["POST"]),
