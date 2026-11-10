@@ -303,6 +303,52 @@ def test_concurrent_sends_share_one_hourly_cap() -> None:
     assert box.check_messages(EVE)["unread_count"] == 30
 
 
+def test_revoked_pairing_does_not_block_the_same_thread_id() -> None:
+    box = _box()
+    eve_link = _pair(box)
+    box.send_message(OWNER_EMAIL, eve_link, "old", thread_id="chat")
+    box.revoke(OWNER_EMAIL, eve_link, purge=False)
+
+    created = box.request_link(OWNER_EMAIL)
+    box.request_link(CAROL, created["invite_code"])
+    box.decide(OWNER_EMAIL, created["link_id"], "approve")
+    box.decide(CAROL, created["link_id"], "approve")
+    sent = box.send_message(OWNER_EMAIL, created["link_id"], "new", thread_id="chat")
+    replied = box.reply(CAROL, "back", thread_id="chat")
+    assert replied["thread_id"] == "chat"
+    assert replied["msg_id"] != sent["msg_id"]
+    assert box.check_messages(OWNER_EMAIL)["unread_count"] == 1
+
+
+def test_a_retry_does_not_send_while_the_charge_is_unfinished() -> None:
+    class StopDuringCharge(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+
+        def incr(self, key: str, ex: int) -> int:
+            if self.fail and ":rate:" in key:
+                self.fail = False
+                raise RuntimeError("timeout")
+            return super().incr(key, ex)
+
+    store = StopDuringCharge()
+    box = Mailbox(store, base_url="https://drive-test.example.com", clock=store._clock)
+    link_id = _pair(box)
+    with pytest.raises(RuntimeError, match="timeout"):
+        box.send_message(OWNER_EMAIL, link_id, "hello", idempotency_key="once")
+    with pytest.raises(MailboxError) as busy:
+        box.send_message(OWNER_EMAIL, link_id, "hello", idempotency_key="once")
+    assert busy.value.code == "retry"
+    assert box.list_inbox(EVE)["messages"] == []
+
+    flag = next(key for key in store._values if key.startswith("bridge:sent:"))
+    store.delete(flag)
+    finished = box.send_message(OWNER_EMAIL, link_id, "hello", idempotency_key="once")
+    assert finished["idempotent_replay"] is False
+    assert len(box.list_inbox(EVE)["messages"]) == 1
+
+
 def test_check_messages_loads_only_the_previews() -> None:
     class CountingStore(MemoryStore):
         def __init__(self) -> None:

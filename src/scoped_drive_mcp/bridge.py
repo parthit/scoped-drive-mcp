@@ -461,8 +461,8 @@ class Mailbox:
         already_queued = self._queued(peer, msg_id)
         try:
             self._charge_once(you, link["link_id"], msg_id)
-        except MailboxError:
-            if not already_queued:
+        except MailboxError as exc:
+            if exc.code == "rate_limited" and not already_queued:
                 self._release_pending(idem_key, token, peer, msg_id)
             raise
         self._publish(message)
@@ -476,15 +476,23 @@ class Mailbox:
             self.store.delete(idem_key)
 
     def _charge_once(self, you: str, link_id: str, msg_id: str) -> None:
-        """Count this msg_id once. A retry that already paid does not pay again."""
+        """Count this msg_id once. A second caller waits out the charge instead of sending early."""
         flag = f"bridge:sent:{msg_id}"
-        if not self.store.set_if_absent(flag, "1", ex=MESSAGE_TTL):
+        if self.store.get(flag) == "1":
             return
+        if not self.store.set_if_absent(flag, "charging", ex=60):
+            if self.store.get(flag) == "1":
+                return
+            raise MailboxError(
+                "retry",
+                "That send is still finishing. Retry the same idempotency key.",
+            )
         try:
             self._charge_send(you, link_id)
         except MailboxError:
             self.store.delete(flag)
             raise
+        self.store.set(flag, "1", ex=MESSAGE_TTL)
 
     def _publish(self, message: dict[str, Any]) -> None:
         """Save the body, then queue the id. A second call does not insert another copy."""
@@ -652,18 +660,31 @@ class Mailbox:
         return rows
 
     def _link_for_thread(self, you: str, thread_id: str) -> dict[str, Any]:
-        found: list[dict[str, Any]] = []
+        active: list[dict[str, Any]] = []
+        revoked: list[dict[str, Any]] = []
         for link_id in self._user_link_ids(you):
             if not self.store.get(f"bridge:thread:{link_id}:{thread_id}"):
                 continue
             link = self._link(link_id)
             if link is None or you not in _parties(link, self._peer(link_id)):
                 continue
-            if self._thread_has_person(link_id, thread_id, you):
-                found.append(link)
-        if len(found) == 1:
-            return found[0]
-        if not found:
+            if not self._thread_has_person(link_id, thread_id, you):
+                continue
+            status = self._status(link)
+            if status == "revoked":
+                revoked.append(link)
+            elif status == "active":
+                active.append(link)
+        if len(active) == 1:
+            return active[0]
+        if len(active) > 1:
+            raise MailboxError(
+                "thread_mismatch",
+                "That thread id is in use on more than one of your links. Reply with msg_id.",
+            )
+        if len(revoked) == 1:
+            return revoked[0]
+        if not revoked:
             raise MailboxError("not_found", "No matching thread for this person.")
         raise MailboxError(
             "thread_mismatch",
