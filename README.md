@@ -263,7 +263,7 @@ The same **Connected apps** list shows the Muse connection, and **Disconnect** s
 4. **Retry:** ask Grok again. It works now.
 5. **Remove:** in **Access**, click **Remove** next to `Private note`. Ask again: Grok gets a new approval link
    instead of the content (the server stops within ~2 seconds). If the item still has a share from an older
-   bot account, revoke removes that share too.
+   bot account, Remove deletes that share too.
    `get_metadata` and `list_folder` only ever list parent folder ids that are themselves shared, so the ids of
    your other folders never reach Grok.
 6. **Activity** shows every call, grant, revoke and decision (no file contents).
