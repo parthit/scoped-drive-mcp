@@ -33,7 +33,8 @@
 <div class="card">
   <p>MCP endpoint for Grok: <code>{{ mcp_url }}</code></p>
   {% if root_folder_id %}<p>Also allowed through <code>ROOT_FOLDER_ID</code>: <code>{{ root_folder_id }}</code> (change it in Vercel).</p>{% endif %}
-  <p class="muted">Storage: {{ store_kind }}. <a href="/browse">Browse your Drive</a> and tick what the assistant may use.</p>
+  <p class="muted">Storage: {{ store_kind }}. <a href="/browse">Browse your Drive</a> and tick what the assistant may use.
+  <a href="/bridge">Mailbox</a> pairs your assistant with another person's after you both approve.</p>
 </div>
 <h2>Connected apps</h2>
 <p class="muted">Apps such as Grok Bot that signed in with OAuth. Revoking disconnects the app immediately.
