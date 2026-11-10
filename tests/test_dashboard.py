@@ -7,7 +7,7 @@ import pytest
 from scoped_drive_mcp.dashboard import SESSION_COOKIE
 from scoped_drive_mcp.server import build_app
 from scoped_drive_mcp.store import BOT_TOKEN_KEY, KEY_PREFIX, OWNER_TOKEN_KEY, MemoryStore
-from tests.conftest import BASE_URL, BOT_EMAIL, OWNER_EMAIL, TOKENS, make_settings
+from tests.conftest import BASE_URL, OWNER_EMAIL, TOKENS, make_settings
 from tests.dash import MCP_HEADERS, client, csrf, login, mcp_call, post, start_oauth
 
 OWNER_PAGES = [
@@ -16,15 +16,12 @@ OWNER_PAGES = [
     "/access",
     "/requests",
     "/activity",
-    "/connect-bot",
     "/requests/" + "A" * 32,
 ]
 OWNER_POSTS = [
     "/grant",
     "/revoke",
     "/logout",
-    "/connect-bot",
-    "/bot/disconnect",
     "/requests/" + "A" * 32 + "/approve",
     "/requests/" + "A" * 32 + "/deny",
     "/oauth/grants/revoke",
@@ -239,7 +236,7 @@ def test_session_for_other_owner_is_ignored(p2_app, world, memstore, oauth) -> N
     cookie = c.cookies.get(SESSION_COOKIE)
     other = build_app(
         make_settings(root_folder_id=None, owner_email="someone-else@example.com"),
-        world.as_user(BOT_EMAIL),
+        world.as_user(OWNER_EMAIL),
         store=memstore,
         owner_drive_factory=lambda t: world.as_user(OWNER_EMAIL),
         oauth=oauth,
@@ -258,7 +255,7 @@ def no_env_bot_app(world, memstore, oauth):
 
     def bot_factory(token: str):
         built.append(token)
-        return world.as_user(BOT_EMAIL)
+        return world.as_user(OWNER_EMAIL)
 
     app = build_app(
         make_settings(root_folder_id=None, google_oauth_refresh_token=None, allowlist_cache_ttl=0),
@@ -271,60 +268,25 @@ def no_env_bot_app(world, memstore, oauth):
     return app
 
 
-def test_connect_bot_requires_owner(c) -> None:
-    assert c.post("/connect-bot", data={"csrf": "x"}).status_code == 403
-
-
-def test_connect_bot_requires_bot_email(no_env_bot_app, memstore, oauth) -> None:
+def test_sign_in_is_the_only_drive_token(no_env_bot_app, memstore, world) -> None:
     c = client(no_env_bot_app)
-    login(c)
-    for code in ("owner-code", "eve-code"):
-        state = start_oauth(c, "/connect-bot", csrf=csrf(c, "/connect-bot"))
-        assert oauth.hints[-1] == BOT_EMAIL
-        r = c.get("/auth/callback", params={"code": code, "state": state})
-        assert r.status_code == 403
-        assert BOT_EMAIL in r.text
-    assert memstore.get(KEY_PREFIX + BOT_TOKEN_KEY) is None
-    assert c.get("/").status_code == 200  # the owner session survives
-
-
-def test_connect_bot_flow_and_mcp_uses_stored_token(no_env_bot_app, memstore, world) -> None:
-    c = client(no_env_bot_app)
-    login(c)
-    health = c.get("/health").json()
-    assert health["bot_connected"] is False and health["owner_connected"] is True
-    # before connecting, tools explain that the bot is missing
     result = mcp_call(c, "read_file", file_id="loose-doc")
     text = result["content"][0]["text"]
-    assert result["isError"] and "not connected" in text and "Connect bot" in text
+    assert result["isError"] and "owner has not signed in" in text
+    assert "Connect bot" not in text
 
-    state = start_oauth(c, "/connect-bot", csrf=csrf(c, "/connect-bot"))
-    r = c.get("/auth/callback", params={"code": "bot-code", "state": state})
-    assert r.status_code == 303
-    raw = memstore.get(KEY_PREFIX + BOT_TOKEN_KEY)
-    assert raw and "rt-bot" not in raw
+    login(c)
     health = c.get("/health").json()
-    assert health["bot_connected"] is True and health["bot_source"] == "dashboard"
-
-    no_env_bot_app.state.dashboard.bot_drive.invalidate()
+    assert health["bot_connected"] is True and health["bot_source"] == "owner"
+    assert health["owner_connected"] is True
+    assert health["mode"] == "same_account"
     post(c, "/grant", file_id="loose-doc")
+    assert world.files["loose-doc"].permissions == []
     result = mcp_call(c, "read_file", file_id="loose-doc")
     assert result["isError"] is False
     assert result["structuredContent"]["content"] == "memo beta"
-    assert no_env_bot_app.state.bot_tokens == [f"rt-{BOT_EMAIL}"]
-
-    r = post(c, "/bot/disconnect")
-    assert r.status_code == 303
+    assert no_env_bot_app.state.bot_tokens == [f"rt-{OWNER_EMAIL}"]
     assert memstore.get(KEY_PREFIX + BOT_TOKEN_KEY) is None
-
-
-def test_bot_session_does_not_become_owner(no_env_bot_app) -> None:
-    c = client(no_env_bot_app)
-    login(c)
-    state = start_oauth(c, "/connect-bot", csrf=csrf(c, "/connect-bot"))
-    c.get("/auth/callback", params={"code": "bot-code", "state": state})
-    page = c.get("/")
-    assert page.status_code == 200 and OWNER_EMAIL in page.text
 
 
 # ---- CSRF -------------------------------------------------------------------------------
@@ -335,8 +297,6 @@ def test_csrf_required_on_every_post(owner_c, world) -> None:
         "/grant",
         "/revoke",
         "/logout",
-        "/connect-bot",
-        "/bot/disconnect",
         "/oauth/authorize",
         "/oauth/grants/revoke",
     ):
@@ -359,7 +319,7 @@ def test_cross_origin_post_refused(owner_c, world) -> None:
         "/grant", data={"csrf": token, "file_id": "proj"}, headers={"Origin": BASE_URL}
     )
     assert r.status_code == 303
-    assert len(world.files["proj"].permissions) == 1
+    assert world.files["proj"].permissions == []
 
 
 def test_csrf_token_rotates_on_login(c) -> None:
@@ -424,7 +384,7 @@ def test_grant_and_revoke_from_dashboard(owner_c, world, p2_app) -> None:
     assert mcp_call(owner_c, "read_file", file_id="proj-notes")["isError"] is True
     r = post(owner_c, "/grant", file_id="proj", next="/browse")
     assert r.status_code == 303 and r.headers["location"] == "/browse"
-    assert [p["emailAddress"] for p in world.files["proj"].permissions] == [BOT_EMAIL]
+    assert world.files["proj"].permissions == []
     page = owner_c.get("/browse").text
     assert "Revoke" in page
     page = owner_c.get("/browse?folder=proj").text
@@ -450,7 +410,7 @@ def test_grant_errors_are_shown(owner_c) -> None:
 
 def test_grant_shortcut_from_browse(owner_c, world) -> None:
     post(owner_c, "/grant", file_id="proj-shortcut")
-    assert [p["emailAddress"] for p in world.files["priv-secret"].permissions] == [BOT_EMAIL]
+    assert world.files["priv-secret"].permissions == []
     assert world.files["proj-shortcut"].permissions == []
 
 
@@ -479,7 +439,7 @@ def test_overview_and_health_report_status(owner_c) -> None:
 def test_dashboard_not_configured(world) -> None:
     app = build_app(
         make_settings(session_secret=None, owner_email=None),
-        world.as_user(BOT_EMAIL),
+        world.as_user(OWNER_EMAIL),
         store=MemoryStore(),
     )
     c = client(app)

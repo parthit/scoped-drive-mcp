@@ -221,12 +221,12 @@ class Settings(BaseSettings):
 
     @property
     def same_account(self) -> bool:
-        """No separate bot: the MCP tools act as the owner and the allowlist is the only wall."""
-        return self.bot_email is None or self.bot_email == self.owner_email
+        """The MCP tools act as the signed-in user. `BOT_EMAIL` is ignored."""
+        return True
 
     @property
-    def mode(self) -> Literal["same_account", "separate_bot"]:
-        return "same_account" if self.same_account else "separate_bot"
+    def mode(self) -> Literal["same_account"]:
+        return "same_account"
 
     @property
     def oauth_client_configured(self) -> bool:

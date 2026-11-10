@@ -213,7 +213,7 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
     spy = SpyStore()
     app = build_app(
         p2_settings,
-        world.as_user(p2_settings.bot_email or p2_settings.owner_email or ""),
+        world.as_user(p2_settings.owner_email or ""),
         store=spy,
         oauth=oauth,
         owner_drive_factory=lambda _token: world.as_user(p2_settings.owner_email or ""),

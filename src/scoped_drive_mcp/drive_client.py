@@ -31,18 +31,15 @@ class DriveNotFoundError(Exception):
     """The file does not exist or the identity cannot see it."""
 
 
-BOT_NOT_CONNECTED = (
-    "The Drive bot account is not connected yet. Ask the owner to open the "
-    "dashboard and use 'Connect bot'."
-)
 OWNER_NOT_SIGNED_IN = (
     "The owner has not signed in to the dashboard yet. Ask the owner to open the "
     "dashboard and sign in with Google."
 )
+BOT_NOT_CONNECTED = OWNER_NOT_SIGNED_IN
 
 
 class BotNotConnectedError(Exception):
-    """No refresh token for the bot account (neither env var nor dashboard connection)."""
+    """No refresh token for the signed-in user (neither env var nor dashboard sign-in)."""
 
     def __init__(self, detail: str = "", user_message: str = BOT_NOT_CONNECTED):
         super().__init__(detail or user_message)
@@ -285,10 +282,10 @@ class GoogleOwnerDriveClient(GoogleDriveClient):
 
 
 class LazyBotDriveClient:
-    """DriveClient for the bot whose refresh token is looked up on use.
+    """DriveClient for the signed-in user, whose refresh token is looked up on use.
 
-    The env var GOOGLE_OAUTH_REFRESH_TOKEN wins; otherwise the token stored by the
-    dashboard's /connect-bot flow is used (re-read at most every `ttl` seconds).
+    The env var GOOGLE_OAUTH_REFRESH_TOKEN wins; otherwise the token stored by
+    dashboard sign-in is used (re-read at most every `ttl` seconds).
     """
 
     def __init__(
@@ -377,11 +374,11 @@ class LazyBotDriveClient:
 
 
 class RoutingDriveClient:
-    """Sends each Drive call to the admin's client or to that person's bot.
+    """Sends each Drive call to the admin's client or to that person's own Drive.
 
     Tests that inject one Drive client keep using it for the admin and for API tokens.
-    Any other actor resolves their own bot refresh token and builds a client with
-    `bot_drive_factory`. A missing bot is the same error the dashboard already shows.
+    Any other actor resolves their own sign-in refresh token and builds a client with
+    `bot_drive_factory`. A missing sign-in is the same error the dashboard already shows.
     """
 
     def __init__(
@@ -416,7 +413,7 @@ class RoutingDriveClient:
             return self._admin
         token = self._token_for(actor)
         if not token:
-            raise BotNotConnectedError("the bot account is not connected", BOT_NOT_CONNECTED)
+            raise BotNotConnectedError("the owner has not signed in", OWNER_NOT_SIGNED_IN)
         with self._lock:
             cached = self._clients.get(actor)
             if cached is not None and cached[0] == token:

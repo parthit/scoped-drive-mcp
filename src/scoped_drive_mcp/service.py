@@ -174,7 +174,7 @@ class DriveService:
         return meta
 
     def peek_name(self, file_id: str) -> str | None:
-        """The file's name if the bot can see it (for the owner's approval page only)."""
+        """The file's name if this sign-in can see it (for the approval page only)."""
         try:
             return str(self.drive.get_file(file_id, fields="id,name").get("name") or "") or None
         except Exception:
