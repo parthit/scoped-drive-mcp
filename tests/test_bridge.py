@@ -98,7 +98,8 @@ def test_revoke_hides_mail_and_purge_deletes_it() -> None:
     assert revoked.value.code == "link_revoked"
     assert box.store.get(f"bridge:msg:{sent['msg_id']}") is not None
 
-    assert sent["msg_id"] in box.store.lrange(f"bridge:inbox:{EVE}", 0, -1)
+    inbox = box.store.lrange(f"bridge:inbox:{EVE}", 0, -1)
+    assert len(inbox) == 1 and inbox[0].startswith(f"{sent['msg_id']}|")
     box.revoke(OWNER_EMAIL, link_id, purge=True)
     assert box.store.get(f"bridge:msg:{sent['msg_id']}") is None
     assert box.store.lrange(f"bridge:inbox:{EVE}", 0, -1) == []
@@ -222,7 +223,9 @@ def test_dead_inbox_ids_do_not_hide_live_mail() -> None:
     page = box.list_inbox(EVE, limit=10)
     assert [row["msg_id"] for row in page["messages"]] == [sent["msg_id"]]
     assert box.check_messages(EVE)["unread_count"] == 1
-    assert box.store.lrange(inbox_key, 0, -1) == [sent["msg_id"]]
+    remaining = box.store.lrange(inbox_key, 0, -1)
+    assert len(remaining) == 1
+    assert remaining[0].startswith(f"{sent['msg_id']}|")
 
 
 def test_interrupted_send_is_finished_by_the_same_idempotency_key() -> None:
@@ -298,6 +301,35 @@ def test_concurrent_sends_share_one_hourly_cap() -> None:
     assert results.count("ok") == 30
     assert results.count("rate_limited") == 10
     assert box.check_messages(EVE)["unread_count"] == 30
+
+
+def test_check_messages_loads_only_the_previews() -> None:
+    class CountingStore(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.msg_gets = 0
+
+        def get(self, key: str) -> str | None:
+            if key.startswith("bridge:msg:"):
+                self.msg_gets += 1
+            return super().get(key)
+
+    store = CountingStore()
+    box = Mailbox(store, base_url="https://drive-test.example.com", clock=store._clock)
+    link_id = _pair(box)
+    for n in range(8):
+        box.send_message(OWNER_EMAIL, link_id, f"note {n}")
+    store.msg_gets = 0
+    checked = box.check_messages(EVE)
+    assert checked["unread_count"] == 8
+    assert len(checked["latest_preview"]) == 5
+    assert store.msg_gets == 5
+
+    store.msg_gets = 0
+    page = box.list_inbox(EVE, limit=2)
+    assert len(page["messages"]) == 2
+    assert page["next_cursor"] == page["messages"][-1]["msg_id"]
+    assert store.msg_gets == 2
 
 
 def test_prefixed_store_incr_expires_and_lrem_removes_every_copy() -> None:

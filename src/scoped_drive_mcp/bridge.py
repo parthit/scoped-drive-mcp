@@ -17,7 +17,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .store import KeyValueStore
+from .store import KeyValueStore, parse_inbox_token
 
 HOUR = 3600
 DAY = 24 * HOUR
@@ -172,46 +172,60 @@ class Mailbox:
         size = _limit(limit)
         if link_id:
             self._require_active(you, link_id)
-        rows = self._inbox_rows(you, link_id, unread_only)
+        entries = self._inbox_index(you, link_id, unread_only)
+        start = 0
         if cursor:
-            ids = [row["msg_id"] for row in rows]
+            ids = [entry["msg_id"] for entry in entries]
             if cursor not in ids:
                 raise MailboxError(
                     "invalid_cursor",
                     "The inbox cursor is not valid. Call list_inbox again without it.",
                 )
-            rows = rows[ids.index(cursor) + 1 :]
-        page = rows[:size]
-        next_cursor = page[-1]["msg_id"] if len(rows) > size else None
+            start = ids.index(cursor) + 1
+        messages: list[dict[str, Any]] = []
+        index = start
+        while index < len(entries) and len(messages) < size:
+            message = self._message(entries[index]["msg_id"])
+            index += 1
+            if message is None or message["to"] != you:
+                continue
+            messages.append(message)
+        next_cursor = messages[-1]["msg_id"] if messages and index < len(entries) else None
         return {
             "content_trust": "untrusted_peer",
             "handling": HANDLING,
-            "messages": [self._public_message(row) for row in page],
+            "messages": [self._public_message(row) for row in messages],
             "next_cursor": next_cursor,
         }
 
     def check_messages(self, email: str, since: str | None = None) -> dict[str, Any]:
         you = _email(email)
         after = _parse_since(since) if since else None
-        unread = self._inbox_rows(you, None, unread_only=True)
-        visible = unread
+        entries = self._inbox_index(you, None, unread_only=True)
+        visible = entries
         if after is not None:
-            visible = [row for row in unread if self._stamp(row["created_at"]) > after]
-        previews = [
-            {
-                "msg_id": row["msg_id"],
-                "link_id": row["link_id"],
-                "from": row["from"],
-                "preview": preview_untrusted(row["body"]),
-                "created_at": row["created_at"],
-                "thread_id": row["thread_id"],
-            }
-            for row in visible[:5]
-        ]
+            visible = [entry for entry in entries if entry["created"] > after]
+        previews = []
+        for entry in visible:
+            if len(previews) == 5:
+                break
+            message = self._message(entry["msg_id"])
+            if message is None or message["to"] != you:
+                continue
+            previews.append(
+                {
+                    "msg_id": message["msg_id"],
+                    "link_id": message["link_id"],
+                    "from": message["from"],
+                    "preview": preview_untrusted(message["body"]),
+                    "created_at": message["created_at"],
+                    "thread_id": message["thread_id"],
+                }
+            )
         return {
             "content_trust": "untrusted_peer",
             "handling": HANDLING,
-            "unread_count": len(unread),
+            "unread_count": len(entries),
             "latest_preview": previews,
         }
 
@@ -230,6 +244,7 @@ class Mailbox:
                 continue
             message["read_at"] = now
             self._save_message(message)
+            self._mark_inbox_read(you, message)
             marked += 1
         return {"ok": True, "marked": marked}
 
@@ -477,21 +492,48 @@ class Mailbox:
         link_id = message["link_id"]
         thread = message["thread_id"]
         self.store.set(f"bridge:thread:{link_id}:{thread}", link_id, ex=MESSAGE_TTL)
-        self._push_once(f"bridge:inbox:{message['to']}", message["msg_id"])
-        self._push_once(f"bridge:linkmsgs:{link_id}", message["msg_id"])
-        self._push_once(f"bridge:threadmsgs:{link_id}:{thread}", message["msg_id"])
+        token = self._inbox_token(message, read=False)
+        remaining = max(int(self._stamp(message["expires_at"]) - self._now()), 1)
+        self.store.set(f"bridge:row:{message['msg_id']}", token, ex=remaining)
+        self._push_once(f"bridge:inbox:{message['to']}", message["msg_id"], token)
+        self._push_once(f"bridge:linkmsgs:{link_id}", message["msg_id"], message["msg_id"])
+        thread_key = f"bridge:threadmsgs:{link_id}:{thread}"
+        self._push_once(thread_key, message["msg_id"], message["msg_id"])
 
-    def _push_once(self, key: str, msg_id: str) -> None:
-        """Queue `msg_id` unless this list already has it. The mark is written after the push."""
+    def _push_once(self, key: str, msg_id: str, value: str) -> None:
+        """Queue `value` unless this list already has `msg_id`. The mark follows the push."""
         mark = f"bridge:queued:{key}:{msg_id}"
-        if self.store.get(mark) and msg_id in self.store.lrange(key, 0, -1):
+        if self.store.get(mark) and self._list_has(key, msg_id):
             return
-        if msg_id not in self.store.lrange(key, 0, -1):
-            self.store.lpush(key, msg_id)
+        if not self._list_has(key, msg_id):
+            self.store.lpush(key, value)
         self.store.set(mark, "1", ex=MESSAGE_TTL)
 
+    def _list_has(self, key: str, msg_id: str) -> bool:
+        prefix = f"{msg_id}|"
+        return any(
+            item == msg_id or item.startswith(prefix) for item in self.store.lrange(key, 0, -1)
+        )
+
     def _queued(self, peer: str, msg_id: str) -> bool:
-        return msg_id in self.store.lrange(f"bridge:inbox:{peer}", 0, -1)
+        return self._list_has(f"bridge:inbox:{peer}", msg_id)
+
+    def _inbox_token(self, message: dict[str, Any], read: bool) -> str:
+        created = int(self._stamp(message["created_at"]))
+        expires = int(self._stamp(message["expires_at"]))
+        flag = "0" if read else "1"
+        return f"{message['msg_id']}|{message['link_id']}|{created}|{expires}|{flag}"
+
+    def _mark_inbox_read(self, you: str, message: dict[str, Any]) -> None:
+        inbox = f"bridge:inbox:{you}"
+        read_token = self._inbox_token(message, read=True)
+        unread_token = self._inbox_token(message, read=False)
+        stored = self.store.get(f"bridge:row:{message['msg_id']}")
+        if stored and stored not in (read_token, unread_token):
+            self.store.lreplace(inbox, stored, read_token)
+        self.store.lreplace(inbox, unread_token, read_token)
+        remaining = max(int(self._stamp(message["expires_at"]) - self._now()), 1)
+        self.store.set(f"bridge:row:{message['msg_id']}", read_token, ex=remaining)
 
     def _replay(
         self, msg_id: str, you: str, link_id: str, body: str, thread_id: str | None
@@ -579,26 +621,34 @@ class Mailbox:
             "expires_at": message["expires_at"],
         }
 
-    def _inbox_rows(self, you: str, link_id: str | None, unread_only: bool) -> list[dict[str, Any]]:
+    def _inbox_index(
+        self, you: str, link_id: str | None, unread_only: bool
+    ) -> list[dict[str, Any]]:
+        """Newest-first ids from the inbox list. Message bodies are loaded later, per page."""
         inbox_key = f"bridge:inbox:{you}"
-        rows = []
+        self.store.ldrop_expired(inbox_key, int(self._now()))
+        rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for msg_id in self.store.lrange(inbox_key, 0, -1):
-            if msg_id in seen:
+        active: dict[str, bool] = {}
+        for raw in self.store.lrange(inbox_key, 0, -1):
+            parsed = parse_inbox_token(raw)
+            if parsed is None:
+                self.store.lrem(inbox_key, raw)
+                continue
+            msg_id, token_link, created, expires, unread = parsed
+            if msg_id in seen or expires <= self._now():
                 continue
             seen.add(msg_id)
-            message = self._message(msg_id)
-            if message is None or message["to"] != you:
-                self.store.lrem(inbox_key, msg_id)
+            if link_id and token_link != link_id:
                 continue
-            if link_id and message["link_id"] != link_id:
+            if unread_only and not unread:
                 continue
-            if unread_only and message.get("read_at"):
+            if token_link not in active:
+                link = self._link(token_link)
+                active[token_link] = link is not None and self._status(link) == "active"
+            if not active[token_link]:
                 continue
-            link = self._link(message["link_id"])
-            if link is None or self._status(link) != "active":
-                continue
-            rows.append(message)
+            rows.append({"msg_id": msg_id, "link_id": token_link, "created": float(created)})
         return rows
 
     def _link_for_thread(self, you: str, thread_id: str) -> dict[str, Any]:
@@ -724,14 +774,24 @@ class Mailbox:
             people.append(peer)
         for msg_id in self.store.lrange(f"bridge:linkmsgs:{link_id}", 0, -1):
             message = self._message(msg_id)
+            row_key = f"bridge:row:{msg_id}"
+            stored = self.store.get(row_key)
             if self.store.get(f"bridge:msg:{msg_id}") is not None:
                 self.store.delete(f"bridge:msg:{msg_id}")
                 deleted += 1
-            for person in people:
-                self.store.lrem(f"bridge:inbox:{person}", msg_id)
+            self.store.delete(row_key)
+            tokens = [msg_id]
+            if stored:
+                tokens.append(stored)
             if message is not None:
+                tokens.append(self._inbox_token(message, read=False))
+                tokens.append(self._inbox_token(message, read=True))
                 thread_key = f"bridge:threadmsgs:{link_id}:{message['thread_id']}"
                 self.store.lrem(thread_key, msg_id)
+            for person in people:
+                inbox_key = f"bridge:inbox:{person}"
+                for token in tokens:
+                    self.store.lrem(inbox_key, token)
         self.store.delete(f"bridge:linkmsgs:{link_id}")
         return deleted
 

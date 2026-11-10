@@ -10,6 +10,7 @@ is stored under `u:{email}:` on that same prefixed store.
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -48,6 +49,53 @@ end
 return n
 """
 
+# Inbox rows are msg_id|link_id|created_epoch|expires_epoch|unread. Anything else is dropped.
+_INBOX_TOKEN = re.compile(r"^([^|]+)\|([^|]+)\|([0-9]+)\|([0-9]+)\|([01])$")
+
+_LDROP_EXPIRED_SCRIPT = """
+local now = tonumber(ARGV[1])
+local removed = 0
+for _, value in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
+    local expires = string.match(value, '^[^|]+|[^|]+|[0-9]+|([0-9]+)|[01]$')
+    if (not expires) or (tonumber(expires) <= now) then
+        redis.call('LREM', KEYS[1], 0, value)
+        removed = removed + 1
+    end
+end
+return removed
+"""
+
+_LREPLACE_SCRIPT = """
+local replaced = 0
+local index = 0
+while true do
+    local value = redis.call('LINDEX', KEYS[1], index)
+    if not value then
+        break
+    end
+    if value == ARGV[1] then
+        redis.call('LSET', KEYS[1], index, ARGV[2])
+        replaced = replaced + 1
+    end
+    index = index + 1
+end
+return replaced
+"""
+
+
+def parse_inbox_token(value: str) -> tuple[str, str, int, int, bool] | None:
+    """Return msg_id, link_id, created epoch, expires epoch, and unread. None if malformed."""
+    match = _INBOX_TOKEN.fullmatch(value)
+    if match is None:
+        return None
+    return (
+        match.group(1),
+        match.group(2),
+        int(match.group(3)),
+        int(match.group(4)),
+        match.group(5) == "1",
+    )
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -65,6 +113,8 @@ class KeyValueStore(Protocol):
     def ltrim(self, key: str, start: int, stop: int) -> None: ...
     def lrange(self, key: str, start: int, stop: int) -> list[str]: ...
     def lrem(self, key: str, value: str) -> int: ...
+    def lreplace(self, key: str, old: str, new: str) -> int: ...
+    def ldrop_expired(self, key: str, now: int) -> int: ...
     def incr(self, key: str, ex: int) -> int: ...
 
 
@@ -166,6 +216,35 @@ class MemoryStore:
             current[:] = kept
             return removed
 
+    def lreplace(self, key: str, old: str, new: str) -> int:
+        with self._lock:
+            current = self._live(key)
+            if not isinstance(current, list):
+                return 0
+            replaced = 0
+            for index, item in enumerate(current):
+                if item == old:
+                    current[index] = new
+                    replaced += 1
+            return replaced
+
+    def ldrop_expired(self, key: str, now: int) -> int:
+        """Remove expired or malformed inbox rows. A concurrent push of a new row stays."""
+        with self._lock:
+            current = self._live(key)
+            if not isinstance(current, list):
+                return 0
+            kept = []
+            removed = 0
+            for item in current:
+                parsed = parse_inbox_token(item)
+                if parsed is not None and parsed[3] > now:
+                    kept.append(item)
+                else:
+                    removed += 1
+            current[:] = kept
+            return removed
+
     def incr(self, key: str, ex: int) -> int:
         """Add one and return the new value. An expired key starts again at 1."""
         with self._lock:
@@ -239,6 +318,15 @@ class RedisStore:
     def lrem(self, key: str, value: str) -> int:
         removed = self._redis.lrem(key, 0, value)
         return int(removed or 0)
+
+    def lreplace(self, key: str, old: str, new: str) -> int:
+        value = self._redis.eval(_LREPLACE_SCRIPT, keys=[key], args=[old, new])
+        return int(value or 0)
+
+    def ldrop_expired(self, key: str, now: int) -> int:
+        """Remove expired or malformed inbox rows inside one script. New pushes stay."""
+        value = self._redis.eval(_LDROP_EXPIRED_SCRIPT, keys=[key], args=[now])
+        return int(value or 0)
 
     def incr(self, key: str, ex: int) -> int:
         """INCR and, on the first hit, EXPIRE. One script so the TTL cannot be skipped."""
@@ -333,6 +421,12 @@ class ActorStore:
 
     def lrem(self, key: str, value: str) -> int:
         return int(self.inner.lrem(self._key(key), value))
+
+    def lreplace(self, key: str, old: str, new: str) -> int:
+        return int(self.inner.lreplace(self._key(key), old, new))
+
+    def ldrop_expired(self, key: str, now: int) -> int:
+        return int(self.inner.ldrop_expired(self._key(key), now))
 
     def incr(self, key: str, ex: int) -> int:
         return int(self.inner.incr(self._key(key), ex))
@@ -566,6 +660,41 @@ class PostgresStore:
             return int(result.rowcount or 0)
 
         return int(self._run(remove))
+
+    def lreplace(self, key: str, old: str, new: str) -> int:
+        def swap(conn: Any) -> int:
+            result = conn.execute(
+                "UPDATE sdm_list SET value = %s WHERE key = %s AND value = %s",
+                (new, key, old),
+            )
+            return int(result.rowcount or 0)
+
+        return int(self._run(swap))
+
+    def ldrop_expired(self, key: str, now: int) -> int:
+        """Remove expired or malformed inbox rows. A row inserted concurrently stays."""
+
+        def drop(conn: Any) -> int:
+            malformed = conn.execute(
+                """
+                DELETE FROM sdm_list
+                WHERE key = %s
+                  AND value !~ '^[^|]+\\|[^|]+\\|[0-9]+\\|[0-9]+\\|[01]$'
+                """,
+                (key,),
+            )
+            expired = conn.execute(
+                """
+                DELETE FROM sdm_list
+                WHERE key = %s
+                  AND value ~ '^[^|]+\\|[^|]+\\|[0-9]+\\|[0-9]+\\|[01]$'
+                  AND split_part(value, '|', 4)::bigint <= %s
+                """,
+                (key, now),
+            )
+            return int(malformed.rowcount or 0) + int(expired.rowcount or 0)
+
+        return int(self._run(drop))
 
     def incr(self, key: str, ex: int) -> int:
         """Add one in a single statement. An expired row starts again at 1."""
