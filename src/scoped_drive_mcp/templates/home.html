@@ -4,13 +4,13 @@
 <div class="card" style="max-width:640px;">
   <h1>Scoped Drive</h1>
   <p>Scoped Drive is a gateway that sits in front of Google Drive.</p>
-  <p>You sign in with Google, then tick the files and folders an assistant may use. Drive’s
-     API cannot limit an app to those items, so this server checks every call against
+  <p>You sign in with your own Google account, then tick the files and folders an assistant
+     may use. Each person’s files stay separate.</p>
+  <p>Drive’s API cannot limit an app to those items, so this server checks every call against
      your list before it reaches Drive. Anything you have not allowed is refused. If the
      assistant asks for something else, you get a link to allow or deny it.</p>
-  <p>Only the Google account configured as the owner can sign in. The assistant reaches
-     Drive only through a connection that owner created, and only for the items that
-     owner allowed.</p>
+  <p>The assistant uses a second Gmail that you connect. Items you allow are shared with
+     that account. The rest of your Drive stays with you.</p>
   <p><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms of service</a></p>
   <p><a class="btn primary" href="/login">Sign in</a></p>
 </div>

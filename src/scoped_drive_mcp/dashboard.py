@@ -46,7 +46,6 @@ from .drive_client import (
 from .grants import OWNER_FIELDS, GrantError, GrantService
 from .mcp_oauth import SCOPE, AuthorizeError, McpOAuth, QueryMapping
 from .oauth import OAuthClient, OAuthError
-from .policy import ADMIN_TOOLS
 from .scope import InvalidInputError, clean_search_text, parents_clause, validate_drive_id
 from .store import ActivityLog, Allowlist, TokenVault
 
@@ -249,6 +248,21 @@ def flash(request: Request, kind: str, message: str) -> None:
     request.session["flash"] = messages[-5:]
 
 
+def _pending_nav(request: Request) -> int:
+    """Waiting access requests for the signed-in person. Zero when the tenant is not set."""
+    owner = request.session.get("owner")
+    if not isinstance(owner, str) or current_actor.get() != owner:
+        return 0
+    dash = getattr(request.app.state, "dashboard", None)
+    if dash is None:
+        return 0
+    try:
+        return sum(1 for item in dash.requests.recent(100) if item.status == PENDING)
+    except Exception:
+        logger.exception("pending request count failed")
+        return 0
+
+
 def render(request: Request, template: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
     owner = request.session.get("owner")
     admin_email = getattr(request.app.state, "owner_email", None)
@@ -259,6 +273,7 @@ def render(request: Request, template: str, status_code: int = 200, **ctx: Any) 
         csrf=_csrf_token(request) if owner else None,
         flashes=request.session.pop("flash", []) if owner else [],
         nav=request.url.path,
+        pending_count=ctx.pop("pending_count", _pending_nav(request)),
         **ctx,
     )
     return HTMLResponse(html, status_code=status_code)
@@ -452,7 +467,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         email = str(info.get("email", "")).strip().lower()
         verified = info.get("email_verified") in (True, "true")
         action = "login" if flow == "owner" else "connect_bot"
-        if flow == "owner" and not verified:
+        if flow == "owner" and (not verified or not settings.sign_in_allowed(email)):
             await blocking(oauth.revoke, tokens.refresh_token or tokens.access_token)
             audit_owner(action, "deny", reason="wrong_account")
             return render(
@@ -682,7 +697,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         file_id = validate_drive_id(form.get("file_id"))
         try:
             entry = await blocking(ctx.grants().grant, file_id)
-            flash(request, "ok", f"Shared \u201c{entry.name}\u201d with the assistant.")
+            flash(request, "ok", f"Allowed \u201c{entry.name}\u201d for the assistant.")
         except GrantError as exc:
             flash(request, "error", str(exc))
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
@@ -691,7 +706,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         file_id = validate_drive_id(form.get("file_id"))
         try:
             await blocking(ctx.grants().revoke, file_id)
-            flash(request, "ok", "Access revoked.")
+            flash(request, "ok", "Removed. The assistant can no longer use it.")
         except GrantError as exc:
             flash(request, "error", str(exc))
         return RedirectResponse(safe_next(form.get("next")), status_code=303)
@@ -894,10 +909,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             request,
             "consent.html",
             client_name=pending.client_name,
-            redirect_uri=pending.redirect_uri,
             scope=SCOPE,
             requested_scope=pending.requested_scope,
-            tools=sorted(ADMIN_TOOLS),
         )
 
     async def oauth_decide(request: Request, form: dict[str, str]) -> Response:
@@ -992,7 +1005,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(request, "ok", "Disconnected the app. Its tokens no longer work.")
         return RedirectResponse("/", status_code=303)
 
+    async def confirm_js(_: Request) -> Response:
+        return Response(
+            b"document.addEventListener('submit',function(e){"
+            b"var f=e.target;if(!f||!f.getAttribute)return;"
+            b"var m=f.getAttribute('data-confirm');"
+            b"if(m&&!window.confirm(m))e.preventDefault();});",
+            media_type="text/javascript",
+            headers={"cache-control": "no-store"},
+        )
+
     routes = [
+        Route("/confirm.js", confirm_js, methods=["GET"]),
         Route("/login", login, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
@@ -1036,6 +1060,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ],
     )
     app.state.owner_email = settings.owner_email
+    # Mount("/") serves this app, so request.app is this app, not the outer one.
+    app.state.dashboard = ctx
     return app
 
 

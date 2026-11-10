@@ -275,7 +275,8 @@ def test_requests_page_lists_pending_and_decided(c) -> None:
     mcp_call(c, "read_file", file_id="priv-other")
     post(c, f"/requests/{a['request_id']}/deny")
     page = c.get("/requests").text
-    assert page.count('class="pill pending"') == 1 and page.count('class="pill bad"') == 1
+    # One pending pill in the nav, one on the pending row. The denied row is the bad pill.
+    assert page.count('class="pill pending"') == 2 and page.count('class="pill bad"') == 1
 
 
 def test_requests_expire_after_7_days() -> None:

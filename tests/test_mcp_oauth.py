@@ -347,8 +347,8 @@ def test_approve_issues_a_code_and_deny_does_not(owner_c) -> None:
     page = owner_c.get("/oauth/authorize", params=params)
     assert page.status_code == 200
     assert "Cursor" in page.text
-    assert "drive" in page.text
-    assert "trash_file" in page.text
+    assert "Drive trash" in page.text
+    assert "trash_file" not in page.text
     assert "something-else" in page.text
     denied = post(owner_c, "/oauth/authorize", decision="deny")
     target = posted_redirect(owner_c, denied)

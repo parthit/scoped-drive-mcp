@@ -1,11 +1,10 @@
 {% if mode == "same_account" %}
-<div class="warn" id="mode-warning"><b>Same-account mode.</b> There is no separate bot account
-  (<code>BOT_EMAIL</code> is unset or equals <code>OWNER_EMAIL</code>), so the assistant uses
-  <b>your own</b> Google sign-in, which can reach your whole Drive. Only this server's allowlist keeps
-  it to the items you tick; Google does not enforce anything. For a second, independent wall, create a
-  separate Google account, set <code>BOT_EMAIL</code> to it and connect it.</div>
+<div class="warn" id="mode-warning"><b>Same-account mode.</b> There is no separate Google account
+  for the assistant, so it uses <b>your own</b> Google sign-in, which can reach your whole Drive.
+  Only the list you tick keeps it to those items. Google does not enforce that list. A second
+  Google account is the stronger wall.</div>
 {% else %}
-<p class="muted" id="mode-note">Mode: separate bot account
-  (<code>{{ bot_email or "not connected yet" }}</code>). Ticked items
-  are shared with the bot in Drive and kept on the server's allowlist.</p>
+<p class="muted" id="mode-note">The assistant uses a separate Gmail
+  ({% if bot_email %}{{ bot_email }}{% else %}not connected yet{% endif %}).
+  Items you allow are shared with that account, and this server still checks your list.</p>
 {% endif %}

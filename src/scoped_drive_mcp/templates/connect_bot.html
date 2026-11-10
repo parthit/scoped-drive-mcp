@@ -1,28 +1,29 @@
 {% extends "base.html" %}
-{% block title %}Bot account{% endblock %}
+{% block title %}Second Gmail{% endblock %}
 {% block content %}
-<h1>Bot account</h1>
+<h1>Second Gmail</h1>
 {% if mode == "same_account" %}
 {% include "_mode.html" %}
 <div class="card">
-  <p>Connecting a bot is optional in this mode. The assistant uses your stored sign-in
-    {% if bot.connected %}(<span class="pill ok">connected</span>{% if bot.source == "env" %} through <code>GOOGLE_OAUTH_REFRESH_TOKEN</code>{% endif %}){% else %}(<span class="pill bad">not stored</span>; sign out and in again){% endif %}.</p>
-  <p>To switch to a separate bot: create another Google account, set <code>BOT_EMAIL</code> to it,
-    redeploy, then come back here to connect it and share your allowed items with it.</p>
+  <p>Connecting a second Gmail is optional here. The assistant uses your stored sign-in
+    {% if bot.connected %}(<span class="pill ok">connected</span>){% else %}(<span class="pill bad">not stored</span>; sign out and sign in again){% endif %}.</p>
+  <p>Google will not let this app see only the files you tick. A separate Google account is
+     that wall. The person running this server turns it on, then you come back here to
+     connect that account and share the items you already allowed.</p>
 </div>
 {% else %}
 <div class="card">
   {% if bot_email %}
-  <p>The assistant reaches Drive as <b>{{ bot_email }}</b>. Items you grant are shared with this account,
-     and the server only uses what is on your allowlist.</p>
+  <p>The assistant reaches Drive as <b>{{ bot_email }}</b>. Items you allow are shared with
+     this account, and this server still checks your list.</p>
   {% else %}
-  <p>Connect a second Gmail account you created for the assistant. It must not be the Google
-     account you use to sign in, and it cannot be someone else's account on this server.
-     Items you tick are shared with that bot, and the server only uses what is on your allowlist.</p>
+  <p>Connect a second Gmail you created for the assistant. It must not be the Google
+     account you use to sign in here, and it cannot be someone else’s account on this server.</p>
+  <p>Google will not let this app see only the files you tick, so this separate account is
+     the wall. Items you allow are shared with it.</p>
   {% endif %}
   <p>Status:
     {% if bot.connected %}<span class="pill ok">connected</span>
-      {% if bot.source == "env" %}through the <code>GOOGLE_OAUTH_REFRESH_TOKEN</code> env var{% else %}from this dashboard{% endif %}
     {% else %}<span class="pill bad">not connected</span>{% endif %}
   </p>
   {% if bot_email %}
@@ -33,15 +34,15 @@
   {% else %}
   <p>Connecting asks Google for that account’s email address and full Drive access. Scoped Drive
      uses them only so the assistant can open items you share with this account. On Google’s
-     page, choose the bot Gmail, not the account you use here. See the
+     page, choose the second Gmail, not the account you use here. See the
      <a href="/privacy">privacy policy</a>.</p>
   {% endif %}
   <form method="post" action="/connect-bot" class="inline">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="primary" type="submit">{{ "Reconnect bot" if bot.connected else "Connect bot" }}</button>
+    <button class="primary" type="submit">{{ "Reconnect" if bot.connected else "Connect second Gmail" }}</button>
   </form>
   {% if bot.source == "dashboard" %}
-  <form method="post" action="/bot/disconnect" class="inline">
+  <form method="post" action="/bot/disconnect" class="inline" data-confirm="Remove the stored connection? The assistant cannot reach Drive until you connect it again.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="danger" type="submit">Remove stored connection</button>
   </form>

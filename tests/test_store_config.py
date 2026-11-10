@@ -70,6 +70,7 @@ def test_phase2_env(monkeypatch) -> None:
         {"encryption_key": "not-a-fernet-key"},
         {"session_secret": "short"},
         {"owner_email": "not-an-email"},
+        {"allowed_emails": "not-an-email"},
         {"app_base_url": "http://scoped.example.com"},
         {"app_base_url": "ftp://x"},
         {"redis_rest_url": "http://insecure.example.com"},
@@ -79,6 +80,19 @@ def test_phase2_env(monkeypatch) -> None:
 def test_invalid_phase2_settings(overrides) -> None:
     with pytest.raises(ValidationError):
         make_settings(**overrides)
+
+
+def test_allowed_emails_blank_is_open(monkeypatch) -> None:
+    monkeypatch.setenv("API_TOKENS", API_TOKENS)
+    monkeypatch.setenv("OWNER_EMAIL", "owner@example.com")
+    monkeypatch.setenv("ALLOWED_EMAILS", " Eve@Example.com , ")
+    listed = Settings()
+    assert listed.allowed_emails == frozenset({"eve@example.com"})
+    assert listed.sign_in_allowed("eve@example.com")
+    assert listed.sign_in_allowed("owner@example.com")
+    assert not listed.sign_in_allowed("other@example.com")
+    monkeypatch.setenv("ALLOWED_EMAILS", "  ")
+    assert Settings().sign_in_allowed("other@example.com")
 
 
 def test_localhost_base_url_allowed_and_cookies() -> None:

@@ -10,17 +10,18 @@
      folders. An app that signs in is handed a broad Drive permission: the whole Drive of
      the account that approved it, or only files that app itself created. There is no
      Drive setting for “this app may use these folders through the API, and nothing else.”</p>
-  <p>This server is that control. You sign in, tick the files and folders an assistant may
-     use, and every API call is checked against that list before it reaches Drive. Anything
-     else is refused. If the assistant asks for something you have not allowed, you get an
-     approval link and can allow or deny it. You can untick an item at any time.</p>
-  <p>Only the Google account configured as the owner of this deployment can sign in to the
-     dashboard. An assistant reaches Drive only with a connection that owner created, and
-     only for the items that owner allowed.</p>
+  <p>This server is that control. You sign in with your own Google account, tick the files
+     and folders an assistant may use, and every API call is checked against your list
+     before it reaches Drive. Anything else is refused. If the assistant asks for something
+     you have not allowed, you get an approval link and can allow or deny it. You can
+     remove an item at any time. Another person’s list is not yours, and they cannot see
+     your files through this server.</p>
+  <p>The assistant uses a second Gmail that you connect. Items you allow are shared with
+     that account. The rest of your Drive is not.</p>
   <h2>Using it</h2>
-  <p>Signing in, or connecting an assistant, means you are the owner of this deployment or
-     you are using it with that owner’s permission. Use it for your own Drive. Do not use
-     it to reach files that are not yours.</p>
+  <p>Signing in, or connecting an assistant, means you are using your own Google account on
+     this deployment. Use it for your own Drive. Do not use it to reach files that are
+     not yours.</p>
   <p>The assistant you connect receives the contents of files you allowed. That is what the
      gateway is for. What the assistant does with those contents is covered by the
      assistant’s own terms.</p>
@@ -32,6 +33,6 @@
      copy of them.</p>
   <p>Scoped Drive is not made by Google, and these terms are not Google’s terms.
      <a href="/privacy">Privacy</a> describes what is stored.</p>
-  <p class="muted">Last updated November 3, 2026.</p>
+  <p class="muted">Last updated November 10, 2026.</p>
 </div>
 {% endblock %}

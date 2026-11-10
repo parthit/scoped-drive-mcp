@@ -153,6 +153,9 @@ def test_dashboard_requires_csrf_and_both_approvals(p2_app) -> None:
     page = owner.get("/bridge")
     assert page.status_code == 200
     assert EVE in page.text
+    assert "request_link" not in page.text
+    assert "Invite code" in page.text
+    assert "pending_approval" not in page.text
     approved = owner.post(f"/bridge/{link_id}/approve", data={"csrf": csrf(owner, "/bridge")})
     assert approved.status_code == 303
     assert approved.headers["location"] == "/bridge"
