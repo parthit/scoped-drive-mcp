@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     app_base_url: str | None = None
     session_secret: SecretStr | None = None
     encryption_key: SecretStr | None = None
+    webhooks_enabled: bool = False
+    webhook_kek: SecretStr | None = None
+    webhook_host_allowlist: str = "api2.cursor.sh"
 
     redis_rest_url: str | None = Field(
         default=None,

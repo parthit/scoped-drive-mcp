@@ -46,4 +46,44 @@
   {% endif %}
 </div>
 {% endfor %}
+{% if webhook is defined and webhook.available %}
+<div class="card">
+  <h2>Wake your assistant</h2>
+  <p class="muted">Paste the POST-to URL and key from a Grok Bot webhook routine. A ping sends ids only.
+    The message stays here until your assistant calls check_messages.</p>
+  {% if webhook.configured %}
+  <p>Saved for {{ webhook.auth_scheme }}. Key hint <code>{{ webhook.secret_hint }}</code>.
+    {% if webhook.enabled %}Enabled.{% else %}Paused.{% endif %}
+    {% if webhook.last_error %} Last error: {{ webhook.last_error }}.{% endif %}</p>
+  {% endif %}
+  <form method="post" action="/bridge/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="save">
+    <label>Webhook URL <input name="url" type="url" required value="{{ webhook.url or '' }}" autocomplete="off" spellcheck="false"></label>
+    <label>Sender key <input name="sender_key" type="password" autocomplete="off" placeholder="{% if webhook.secret_hint %}Leave blank to keep the saved key{% else %}Required the first time{% endif %}"></label>
+    <label>Scheme
+      <select name="auth_scheme">
+        <option value="bearer" {% if webhook.auth_scheme != 'bearer_and_x_automation_key' %}selected{% endif %}>bearer</option>
+        <option value="bearer_and_x_automation_key" {% if webhook.auth_scheme == 'bearer_and_x_automation_key' %}selected{% endif %}>bearer and X-Automation-Key</option>
+      </select>
+    </label>
+    <label>Enabled
+      <select name="enabled">
+        <option value="true" {% if not webhook.configured or webhook.enabled %}selected{% endif %}>Yes</option>
+        <option value="false" {% if webhook.configured and not webhook.enabled %}selected{% endif %}>No</option>
+      </select>
+    </label>
+    <button class="primary" type="submit">Save webhook</button>
+  </form>
+  {% if webhook.configured %}
+  <form method="post" action="/bridge/webhook">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="remove">
+    <button type="submit">Remove webhook</button>
+  </form>
+  {% endif %}
+</div>
+{% elif webhook is defined %}
+<p class="muted">Wake-ups are off on this server. Mail still arrives when your assistant calls check_messages.</p>
+{% endif %}
 {% endblock %}

@@ -807,6 +807,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return render(request, "error.html", 404, message="The mailbox is not configured.")
         email = str(request.session.get("owner") or "")
         data = await blocking(ctx.mailbox.list_links, email)
+        data["webhook"] = await blocking(ctx.mailbox.get_webhook, email)
         return render(request, "bridge.html", **data)
 
     def _bridge_act(request: Request, link_id: str, action: str, purge: bool = False) -> str:
@@ -835,6 +836,29 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             flash(request, "error", exc.message)
         else:
             flash(request, "ok", message)
+        return RedirectResponse("/bridge", status_code=303)
+
+    async def bridge_webhook(request: Request, form: dict[str, str]) -> Response:
+        if ctx.mailbox is None:
+            return render(request, "error.html", 404, message="The mailbox is not configured.")
+        email = str(request.session.get("owner") or "")
+        try:
+            if form.get("action") == "remove":
+                await blocking(ctx.mailbox.clear_webhook, email)
+                flash(request, "ok", "Wake-up removed. Mail still waits for check_messages.")
+            else:
+                enabled = form.get("enabled", "true") != "false"
+                await blocking(
+                    ctx.mailbox.set_webhook,
+                    email,
+                    form.get("url") or "",
+                    sender_key=form.get("sender_key") or None,
+                    auth_scheme=form.get("auth_scheme") or "bearer",
+                    enabled=enabled,
+                )
+                flash(request, "ok", "Wake-up saved. The key is not shown again.")
+        except MailboxError as exc:
+            flash(request, "error", exc.message)
         return RedirectResponse("/bridge", status_code=303)
 
     async def revoke_oauth_grant(request: Request, form: dict[str, str]) -> Response:
@@ -875,6 +899,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/requests/{rid}/deny", csrf_protected(request_deny), methods=["POST"]),
         Route("/activity", owner_only(activity), methods=["GET"]),
         Route("/bridge", owner_only(bridge_page), methods=["GET"]),
+        Route("/bridge/webhook", csrf_protected(bridge_webhook), methods=["POST"]),
         Route("/bridge/{link_id}/{action}", csrf_protected(bridge_decide), methods=["POST"]),
         Route("/admin", admin_page, methods=["GET"]),
         Route("/oauth/authorize", oauth_authorize, methods=["GET"]),

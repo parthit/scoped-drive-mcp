@@ -38,6 +38,9 @@ MAILBOX_TOOLS = {
     "check_messages",
     "reply",
     "mark_read",
+    "get_webhook",
+    "set_webhook",
+    "clear_webhook",
 }
 VIEWER_EXPECTED = {
     "search_files",

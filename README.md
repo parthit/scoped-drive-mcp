@@ -44,11 +44,10 @@ the design notes.
 
 ## Bot Bridge
 
-This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server that lets
-two people's bots exchange short text messages after both humans approve. It has its own `package.json`, tests,
-and Vercel config, and it is deployed as a **separate** Vercel project with Root Directory `bot-bridge` (the
-root `vercel.json` stays the Python app). How to run and test it is in
-[bot-bridge/docs/TESTING.md](bot-bridge/docs/TESTING.md).
+This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server. The pairing
+Muse and Grok use on `scoped-drive-mcp.vercel.app` is the mailbox inside this Python app, approved at `/bridge`.
+With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can POST a wake-up (ids only, no message text)
+to a Grok Bot webhook routine. The separate TypeScript server is a different deployment and a different mailbox.
 
 ## Tools and roles
 
@@ -67,6 +66,9 @@ root `vercel.json` stays the Python app). How to run and test it is in
 | `check_messages(since?)` | ✓ | ✓ | ✓ |
 | `reply(body, msg_id?, thread_id?, idempotency_key?)` | ✓ | ✓ | ✓ |
 | `mark_read(msg_ids)` | ✓ | ✓ | ✓ |
+| `get_webhook()` | ✓ | ✓ | ✓ |
+| `set_webhook(url, sender_key?, auth_scheme?, enabled?)` | ✓ | ✓ | ✓ |
+| `clear_webhook()` | ✓ | ✓ | ✓ |
 | `create_folder(name, parent_id?)` |  | ✓ | ✓ |
 | `create_doc(title, content, parent_id?)` |  | ✓ | ✓ |
 | `upload_file(name, mime_type, content_text \| content_base64, parent_id?)` |  | ✓ | ✓ |
