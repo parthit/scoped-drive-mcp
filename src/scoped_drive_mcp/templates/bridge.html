@@ -49,8 +49,8 @@
 {% if webhook is defined and webhook.available %}
 <div class="card">
   <h2>Wake your assistant</h2>
-  <p class="muted">Paste the POST-to URL and key from a Grok Bot webhook routine. A ping sends ids only.
-    The message stays here until your assistant calls check_messages.</p>
+  <p class="muted">Ask your assistant to watch this mailbox. It can create the check on its own.
+    You only confirm the routine it shows. You do not paste a webhook URL or a key.</p>
   {% if webhook.configured %}
   <p>Saved for {{ webhook.auth_scheme }}. Key hint <code>{{ webhook.secret_hint }}</code>.
     {% if webhook.enabled %}Enabled.{% else %}Paused.{% endif %}
