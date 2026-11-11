@@ -370,7 +370,7 @@ class Mailbox:
             "url": record.get("url"),
             "auth_scheme": record.get("scheme"),
             "secret_hint": record.get("hint"),
-            "last_error": record.get("last_error"),
+            "last_error": self.store.get(f"bridge:hookerr:{you}"),
         }
 
     def set_webhook(
@@ -431,9 +431,9 @@ class Mailbox:
             "nonce": nonce,
             "hint": saved_hint,
             "enabled": current.get("enabled", True) if enabled is None else bool(enabled),
-            "last_error": None,
         }
         self.store.set(f"bridge:hook:{you}", json.dumps(record))
+        self.store.delete(f"bridge:hookerr:{you}")
         return self.get_webhook(you)
 
     def clear_webhook(self, email: str) -> dict[str, Any]:
@@ -443,6 +443,7 @@ class Mailbox:
                 "webhook_disabled", "Webhook wake-ups are turned off on this server."
             )
         self.store.delete(f"bridge:hook:{you}")
+        self.store.delete(f"bridge:hookerr:{you}")
         return self.get_webhook(you)
 
     def _hook(self, email: str) -> dict[str, Any] | None:
@@ -464,20 +465,34 @@ class Mailbox:
         mark = f"bridge:woke:{message['msg_id']}"
         if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
             return
+        recipient = str(message["to"])
         try:
             deliver(self.wake, record, message)
         except Exception as exc:
             self.store.delete(mark)
-            detail = exc.args[0] if exc.args else ""
-            if isinstance(detail, str) and detail.startswith("http_"):
-                logged = "http_status"
-            elif isinstance(detail, str) and detail.isidentifier():
-                logged = detail[:80]
-            else:
-                logged = type(exc).__name__
+            logged = _wake_error(exc)
             logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
-            record["last_error"] = logged
-            self.store.set(f"bridge:hook:{message['to']}", json.dumps(record))
+            self._note_wake(recipient, record, logged)
+        else:
+            self._note_wake(recipient, record, None)
+
+    def _note_wake(self, email: str, used: dict[str, Any], error: str | None) -> None:
+        """Record the outcome only while the saved webhook is still the one we called."""
+        current = self._hook(email)
+        if current is None:
+            return
+        same = (
+            current.get("url") == used.get("url")
+            and current.get("ciphertext") == used.get("ciphertext")
+            and current.get("nonce") == used.get("nonce")
+        )
+        if not same:
+            return
+        key = f"bridge:hookerr:{email}"
+        if error is None:
+            self.store.delete(key)
+        else:
+            self.store.set(key, error, ex=MESSAGE_TTL)
 
     def _deliver(
         self,
@@ -970,6 +985,15 @@ def _parties(link: dict[str, Any], peer: str | None) -> set[str]:
     if peer:
         found.add(peer)
     return found
+
+
+def _wake_error(exc: Exception) -> str:
+    detail = exc.args[0] if exc.args else ""
+    if isinstance(detail, str) and detail.startswith("http_"):
+        return "http_status"
+    if isinstance(detail, str) and detail.isidentifier():
+        return detail[:80]
+    return type(exc).__name__
 
 
 def _sent(message: dict[str, Any], replay: bool) -> dict[str, Any]:

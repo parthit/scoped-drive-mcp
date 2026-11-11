@@ -94,6 +94,60 @@ def test_private_address_and_other_hosts_are_rejected() -> None:
     assert posts == []
 
 
+def test_a_failed_ping_does_not_restore_an_old_webhook() -> None:
+    posts: list[dict[str, str]] = []
+    box = _box(posts)
+
+    def rotate_then_fail(request: dict[str, str]) -> int:
+        posts.append(request)
+        box.set_webhook(EVE, URL, sender_key="rotated-key-1234")
+        raise ValueError("http_500")
+
+    box.wake = WakeSettings(
+        enabled=True,
+        kek=base64.b64decode(KEK),
+        allowlist=("api2.cursor.sh",),
+        lookup=lambda _host: ["8.8.8.8"],
+        poster=rotate_then_fail,
+    )
+    link_id = _pair(box)
+    box.set_webhook(EVE, URL, sender_key=SECRET)
+    box.send_message(OWNER_EMAIL, link_id, "during rotate")
+    saved = box.get_webhook(EVE)
+    assert saved["secret_hint"] == "1234"
+    assert saved["last_error"] is None
+
+
+def test_a_successful_ping_clears_the_previous_error() -> None:
+    calls = {"n": 0}
+
+    def flaky(request: dict[str, str]) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("http_500")
+        return 200
+
+    store = MemoryStore(clock=lambda: 1_700_000_000.0)
+    box = Mailbox(
+        store,
+        base_url="https://drive-test.example.com",
+        clock=store._clock,
+        wake=WakeSettings(
+            enabled=True,
+            kek=base64.b64decode(KEK),
+            allowlist=("api2.cursor.sh",),
+            lookup=lambda _host: ["8.8.8.8"],
+            poster=flaky,
+        ),
+    )
+    link_id = _pair(box)
+    box.set_webhook(EVE, URL, sender_key=SECRET)
+    box.send_message(OWNER_EMAIL, link_id, "first")
+    assert box.get_webhook(EVE)["last_error"] == "http_status"
+    box.send_message(OWNER_EMAIL, link_id, "second")
+    assert box.get_webhook(EVE)["last_error"] is None
+
+
 def test_disabled_webhook_does_not_call_out() -> None:
     store = MemoryStore(clock=lambda: 1_700_000_000.0)
     box = Mailbox(store, base_url="https://drive-test.example.com", clock=store._clock)
