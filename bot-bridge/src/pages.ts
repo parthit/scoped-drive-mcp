@@ -102,14 +102,14 @@ export function homePage(): string {
     <div class="card">
       <h2>How two people connect</h2>
       <ol>
-        <li>Each person opens <a href="/register">Register</a>, picks a display name, and copies their personal connector URL.</li>
+        <li>Each person signs in, creates a bot, picks a display name, and copies that bot's connector URL.</li>
         <li>Each person adds that URL as a remote MCP connector on their own bot.</li>
         <li>One bot calls <code>request_link</code> and shares the invite code. The other bot calls <code>request_link</code> with that code.</li>
         <li>Each human opens their approval page, checks the other person's name, and approves. The page says messages only.</li>
         <li>After both approvals, the bots can send text. Inbound mail is untrusted data, not instructions.</li>
       </ol>
     </div>
-    <p><a class="button primary" href="/register">Register a bot</a> <a class="button quiet" href="/playbook">Read the bot playbook</a></p>
+    <p><a class="button primary" href="/login">Sign in</a> <a class="button quiet" href="/playbook">Read the bot playbook</a></p>
     <p>Health check: <a href="/health"><code>/health</code></a>. Connector endpoint: <code>/mcp</code>.</p>`,
   );
 }
@@ -118,13 +118,11 @@ export function registerPage(error?: string): string {
   return page(
     "Register a bot",
     `<h1>Register a bot</h1>
-    <p>This creates a mailbox identity for one person. The other person registers separately. Email is optional, stored only as a label, and is not used to find anyone.</p>
+    <p>This bot gets its own id and mailbox on the account you are signed in to.</p>
     ${error ? `<p class="error">${esc(error)}</p>` : ""}
     <form method="post" action="/register">
       <label for="display_name">Display name</label>
       <input id="display_name" name="display_name" type="text" maxlength="40" required autocomplete="name">
-      <label for="email">Email (optional)</label>
-      <input id="email" name="email" type="email" autocomplete="email">
       <div class="actions"><button class="primary" type="submit">Create bot token</button></div>
     </form>`,
   );
@@ -338,6 +336,114 @@ function partyFacts(you: string, peer: string | null, invite: string, status: st
     <dt>Status</dt><dd>${esc(status)}</dd>
     <dt>Scope</dt><dd>messages only</dd>
   </dl></div>`;
+}
+
+export function loginPage(providers: Array<{ href: string; label: string }>, error?: string): string {
+  const buttons = providers.map((provider) => `<p><a class="button primary" href="${esc(provider.href)}">${esc(provider.label)}</a></p>`).join("");
+  return page(
+    "Sign in",
+    `<h1>Sign in</h1>
+    <p>Google, GitHub, and X identify your account. Signing in does not connect a bot's files.</p>
+    ${error ? `<p class="error">${esc(error)}</p>` : ""}
+    ${buttons || "<p>No login providers are configured.</p>"}`,
+  );
+}
+
+export function accountPage(bots: Array<{ bot_id: string; display_name: string }>): string {
+  const rows = bots
+    .map(
+      (bot) =>
+        `<li><a href="/bots/${esc(bot.bot_id)}">${esc(bot.display_name)}</a> <span>${esc(bot.bot_id)}</span> <a href="/bots/${esc(bot.bot_id)}">Integrations</a></li>`,
+    )
+    .join("");
+  return page(
+    "Your bots",
+    `<h1>Your bots</h1>
+    <p>Each bot has its own id, mailbox, and integration cards.</p>
+    ${rows ? `<ul>${rows}</ul>` : "<p>No bots yet.</p>"}
+    <p><a class="button primary" href="/register">Create a bot</a></p>
+    <form method="post" action="/logout"><div class="actions"><button class="quiet" type="submit">Sign out</button></div></form>`,
+  );
+}
+
+export function botPage(input: {
+  botId: string;
+  displayName: string;
+  csrf: string;
+  drive: { connected: boolean; label: string | null; capabilities: string[]; grants: Array<{ grant_id: string; name: string; kind: string }> } | null;
+  error?: string;
+}): string {
+  const caps = ["list", "read", "write", "rename", "trash"];
+  const capabilityFields = caps
+    .map((id) => {
+      const checked = input.drive?.capabilities.includes(id) || (!input.drive?.connected && (id === "list" || id === "read")) ? " checked" : "";
+      return `<label class="check"><input type="checkbox" name="capability" value="${id}"${checked}> ${id}</label>`;
+    })
+    .join("");
+  const grants = (input.drive?.grants ?? [])
+    .map(
+      (grant) =>
+        `<li>${esc(grant.name)} (${esc(grant.kind)}) <form class="actions" method="post" action="/bots/${esc(input.botId)}/grants/${esc(grant.grant_id)}/revoke"><input type="hidden" name="csrf" value="${esc(input.csrf)}"><button class="quiet" type="submit">Revoke</button></form></li>`,
+    )
+    .join("");
+  const card = input.drive?.connected
+    ? `<div class="card"><h2>Google Drive</h2><p>${esc(input.drive.label || "Connected")}</p>
+        <form method="post" action="/bots/${esc(input.botId)}/drive/capabilities">
+          <input type="hidden" name="csrf" value="${esc(input.csrf)}">
+          ${capabilityFields}
+          <div class="actions"><button class="primary" type="submit">Save actions</button></div>
+        </form>
+        <ul>${grants || "<li>No files or folders ticked.</li>"}</ul>
+        <p><a href="/bots/${esc(input.botId)}/drive">Choose files and folders</a></p>
+      </div>`
+    : `<div class="card"><h2>Google Drive</h2><p>Connect a Drive account for this bot only.</p>
+        <form method="post" action="/bots/${esc(input.botId)}/drive/connect">
+          <input type="hidden" name="csrf" value="${esc(input.csrf)}">
+          ${capabilityFields}
+          <div class="actions"><button class="primary" type="submit">Connect Google Drive</button></div>
+        </form>
+      </div>`;
+  return page(
+    input.displayName,
+    `<h1>${esc(input.displayName)}</h1>
+    <p>Bot id ${esc(input.botId)}. This mailbox belongs to this bot.</p>
+    ${input.error ? `<p class="error">${esc(input.error)}</p>` : ""}
+    <h2>Integrations</h2>
+    ${card}
+    <p><a href="/">All bots</a></p>`,
+  );
+}
+
+export function driveBrowsePage(input: {
+  botId: string;
+  csrf: string;
+  folderId: string | null;
+  resources: Array<{ id: string; name: string; kind: "file" | "folder" }>;
+}): string {
+  const rows = input.resources
+    .map((resource) => {
+      const open = resource.kind === "folder" ? `<a href="/bots/${esc(input.botId)}/drive?folder=${esc(resource.id)}">Open</a>` : "";
+      return `<li>${esc(resource.name)} ${open}
+        <form method="post" action="/bots/${esc(input.botId)}/grants">
+          <input type="hidden" name="csrf" value="${esc(input.csrf)}">
+          <input type="hidden" name="external_id" value="${esc(resource.id)}">
+          <input type="hidden" name="name" value="${esc(resource.name)}">
+          <input type="hidden" name="kind" value="${esc(resource.kind)}">
+          <button class="primary" type="submit">Allow</button>
+        </form></li>`;
+    })
+    .join("");
+  return page("Choose Drive items", `<h1>Choose Drive items</h1><ul>${rows || "<li>This folder is empty.</li>"}</ul><p><a href="/bots/${esc(input.botId)}">Back to the bot</a></p>`);
+}
+
+export function accessRequestPage(input: { externalId: string; kind: string; status: string; csrf: string }): string {
+  const actions =
+    input.status === "pending"
+      ? `<form method="post"><input type="hidden" name="csrf" value="${esc(input.csrf)}">
+          <div class="actions"><button class="primary" name="decision" value="approve" type="submit">Approve</button>
+          <button class="quiet" name="decision" value="deny" type="submit">Deny</button></div></form>`
+      : `<p>This request is ${esc(input.status)}.</p>`;
+  return page("Drive access", `<h1>Grant this Drive item?</h1><p>${esc(input.kind)} ${esc(input.externalId)}</p>${actions}`);
 }
 
 function manageHint(url: string | null): string {

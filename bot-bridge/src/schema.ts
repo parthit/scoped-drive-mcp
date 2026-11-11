@@ -11,6 +11,15 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS login_identities (
+  provider TEXT NOT NULL,
+  provider_user_id TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users (user_id),
+  label TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (provider, provider_user_id)
+);
+
 CREATE TABLE IF NOT EXISTS bots (
   bot_id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users (user_id),
@@ -145,6 +154,54 @@ CREATE TABLE IF NOT EXISTS rate_locks (
   window_start TIMESTAMPTZ NOT NULL,
   hits INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS connections (
+  connection_id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL REFERENCES bots (bot_id),
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  credential_ciphertext TEXT,
+  external_account_label TEXT,
+  scope TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT connections_status_check CHECK (status IN ('active', 'disconnected')),
+  CONSTRAINT connections_bot_provider UNIQUE (bot_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS connection_capabilities (
+  connection_id TEXT NOT NULL REFERENCES connections (connection_id) ON DELETE CASCADE,
+  capability_id TEXT NOT NULL,
+  PRIMARY KEY (connection_id, capability_id)
+);
+
+CREATE TABLE IF NOT EXISTS resource_grants (
+  grant_id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES connections (connection_id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  granted_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT resource_grants_kind_check CHECK (kind IN ('file', 'folder')),
+  CONSTRAINT resource_grants_unique UNIQUE (connection_id, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS access_requests (
+  request_id TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES connections (connection_id) ON DELETE CASCADE,
+  external_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  approval_token TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL,
+  decided_at TIMESTAMPTZ,
+  CONSTRAINT access_requests_status_check CHECK (status IN ('pending', 'approved', 'denied')),
+  CONSTRAINT access_requests_kind_check CHECK (kind IN ('file', 'folder'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS access_requests_one_pending
+  ON access_requests (connection_id, external_id)
+  WHERE status = 'pending';
 `;
 
 export function schemaStatements(sql = SCHEMA_SQL): string[] {

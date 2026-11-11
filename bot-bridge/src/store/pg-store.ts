@@ -1,5 +1,5 @@
 import { schemaStatements } from "../schema.js";
-import type { ApprovalRow, AuditRow, BotRow, DeliveryRow, InboxFilter, LinkRow, ManageRow, MessageRow, NotifierKind, NotifierRow, SettingsTokenRow, Side, UserRow } from "../types.js";
+import type { AccessRequestRow, ApprovalRow, AuditRow, BotRow, ConnectionRow, DeliveryRow, GrantRow, IdentityRow, InboxFilter, LinkRow, ManageRow, MessageRow, NotifierKind, NotifierRow, SettingsTokenRow, Side, UserRow } from "../types.js";
 import { asDate, asDateOrNull, asMeta } from "./coerce.js";
 import type { Db } from "./db.js";
 import type { Store } from "./types.js";
@@ -27,7 +27,7 @@ export class PgStore implements Store {
 
   async clearAll(): Promise<void> {
     await this.db.query(
-      "TRUNCATE TABLE notifier_deliveries, notifiers, bot_settings_tokens, audit_events, messages, manage_tokens, approvals, links, bots, users, rate_locks RESTART IDENTITY CASCADE",
+      "TRUNCATE TABLE access_requests, resource_grants, connection_capabilities, connections, login_identities, notifier_deliveries, notifiers, bot_settings_tokens, audit_events, messages, manage_tokens, approvals, links, bots, users, rate_locks RESTART IDENTITY CASCADE",
     );
   }
 
@@ -37,6 +37,35 @@ export class PgStore implements Store {
       row.email,
       row.created_at,
     ]);
+  }
+
+  async findUser(id: string): Promise<UserRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM users WHERE user_id = $1", [id]);
+    return rows[0] ? mapUser(rows[0]) : null;
+  }
+
+  async insertIdentity(row: IdentityRow): Promise<"ok" | "conflict"> {
+    const rows = await this.db.query<Raw>(
+      `INSERT INTO login_identities (provider, provider_user_id, user_id, label, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (provider, provider_user_id) DO NOTHING
+       RETURNING provider`,
+      [row.provider, row.provider_user_id, row.user_id, row.label, row.created_at],
+    );
+    return rows[0] ? "ok" : "conflict";
+  }
+
+  async findIdentity(provider: string, providerUserId: string): Promise<IdentityRow | null> {
+    const rows = await this.db.query<Raw>(
+      "SELECT * FROM login_identities WHERE provider = $1 AND provider_user_id = $2",
+      [provider, providerUserId],
+    );
+    return rows[0] ? mapIdentity(rows[0]) : null;
+  }
+
+  async listIdentities(userId: string): Promise<IdentityRow[]> {
+    const rows = await this.db.query<Raw>("SELECT * FROM login_identities WHERE user_id = $1 ORDER BY created_at ASC", [userId]);
+    return rows.map(mapIdentity);
   }
 
   async insertBot(row: BotRow): Promise<void> {
@@ -54,6 +83,118 @@ export class PgStore implements Store {
   async findBotById(id: string): Promise<BotRow | null> {
     const rows = await this.db.query<Raw>("SELECT * FROM bots WHERE bot_id = $1", [id]);
     return rows[0] ? mapBot(rows[0]) : null;
+  }
+
+  async listBotsForUser(userId: string): Promise<BotRow[]> {
+    const rows = await this.db.query<Raw>("SELECT * FROM bots WHERE user_id = $1 ORDER BY created_at ASC, bot_id ASC", [userId]);
+    return rows.map(mapBot);
+  }
+
+  async insertConnection(row: ConnectionRow): Promise<"ok" | "conflict"> {
+    const rows = await this.db.query<Raw>(
+      `INSERT INTO connections (
+         connection_id, bot_id, provider, status, credential_ciphertext, external_account_label, scope, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (bot_id, provider) DO NOTHING
+       RETURNING connection_id`,
+      [row.connection_id, row.bot_id, row.provider, row.status, row.credential_ciphertext, row.external_account_label, row.scope, row.created_at],
+    );
+    return rows[0] ? "ok" : "conflict";
+  }
+
+  async findConnectionById(id: string): Promise<ConnectionRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM connections WHERE connection_id = $1", [id]);
+    return rows[0] ? mapConnection(rows[0]) : null;
+  }
+
+  async findConnection(botId: string, provider: string): Promise<ConnectionRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM connections WHERE bot_id = $1 AND provider = $2", [botId, provider]);
+    return rows[0] ? mapConnection(rows[0]) : null;
+  }
+
+  async listConnections(botId: string): Promise<ConnectionRow[]> {
+    const rows = await this.db.query<Raw>("SELECT * FROM connections WHERE bot_id = $1 ORDER BY created_at ASC", [botId]);
+    return rows.map(mapConnection);
+  }
+
+  async updateConnection(row: ConnectionRow): Promise<void> {
+    await this.db.query(
+      `UPDATE connections
+       SET status = $2, credential_ciphertext = $3, external_account_label = $4, scope = $5
+       WHERE connection_id = $1`,
+      [row.connection_id, row.status, row.credential_ciphertext, row.external_account_label, row.scope],
+    );
+  }
+
+  async setCapabilities(connectionId: string, capabilityIds: string[]): Promise<void> {
+    await this.db.query("DELETE FROM connection_capabilities WHERE connection_id = $1", [connectionId]);
+    for (const capabilityId of [...new Set(capabilityIds)]) {
+      await this.db.query(
+        "INSERT INTO connection_capabilities (connection_id, capability_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        [connectionId, capabilityId],
+      );
+    }
+  }
+
+  async listCapabilities(connectionId: string): Promise<string[]> {
+    const rows = await this.db.query<Raw>(
+      "SELECT capability_id FROM connection_capabilities WHERE connection_id = $1 ORDER BY capability_id ASC",
+      [connectionId],
+    );
+    return rows.map((row) => String(row.capability_id));
+  }
+
+  async insertGrant(row: GrantRow): Promise<"ok" | "exists"> {
+    const rows = await this.db.query<Raw>(
+      `INSERT INTO resource_grants (grant_id, connection_id, kind, external_id, name, granted_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (connection_id, external_id) DO NOTHING
+       RETURNING grant_id`,
+      [row.grant_id, row.connection_id, row.kind, row.external_id, row.name, row.granted_at],
+    );
+    return rows[0] ? "ok" : "exists";
+  }
+
+  async listGrants(connectionId: string): Promise<GrantRow[]> {
+    const rows = await this.db.query<Raw>(
+      "SELECT * FROM resource_grants WHERE connection_id = $1 ORDER BY granted_at ASC, grant_id ASC",
+      [connectionId],
+    );
+    return rows.map(mapGrant);
+  }
+
+  async deleteGrant(connectionId: string, grantId: string): Promise<void> {
+    await this.db.query("DELETE FROM resource_grants WHERE connection_id = $1 AND grant_id = $2", [connectionId, grantId]);
+  }
+
+  async insertAccessRequest(row: AccessRequestRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO access_requests (
+         request_id, connection_id, external_id, kind, capability_id, status, approval_token, created_at, decided_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [row.request_id, row.connection_id, row.external_id, row.kind, row.capability_id, row.status, row.approval_token, row.created_at, row.decided_at],
+    );
+  }
+
+  async findPendingAccessRequest(connectionId: string, externalId: string): Promise<AccessRequestRow | null> {
+    const rows = await this.db.query<Raw>(
+      "SELECT * FROM access_requests WHERE connection_id = $1 AND external_id = $2 AND status = 'pending' LIMIT 1",
+      [connectionId, externalId],
+    );
+    return rows[0] ? mapAccessRequest(rows[0]) : null;
+  }
+
+  async findAccessRequestByToken(token: string): Promise<AccessRequestRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM access_requests WHERE approval_token = $1", [token]);
+    return rows[0] ? mapAccessRequest(rows[0]) : null;
+  }
+
+  async updateAccessRequest(row: AccessRequestRow): Promise<void> {
+    await this.db.query("UPDATE access_requests SET status = $2, decided_at = $3 WHERE request_id = $1", [
+      row.request_id,
+      row.status,
+      row.decided_at,
+    ]);
   }
 
   async lockBot(botId: string): Promise<void> {
@@ -652,6 +793,63 @@ function inboxQuery(filter: InboxFilter, countOnly: boolean): { sql: string; par
   return {
     sql: `SELECT m.* ${where} ORDER BY m.created_at DESC, m.msg_id DESC LIMIT $${params.length}`,
     params,
+  };
+}
+
+function mapUser(row: Raw): UserRow {
+  return {
+    user_id: String(row.user_id),
+    email: row.email == null ? null : String(row.email),
+    created_at: asDate(row.created_at),
+  };
+}
+
+function mapIdentity(row: Raw): IdentityRow {
+  return {
+    provider: String(row.provider),
+    provider_user_id: String(row.provider_user_id),
+    user_id: String(row.user_id),
+    label: String(row.label),
+    created_at: asDate(row.created_at),
+  };
+}
+
+function mapConnection(row: Raw): ConnectionRow {
+  return {
+    connection_id: String(row.connection_id),
+    bot_id: String(row.bot_id),
+    provider: String(row.provider),
+    status: row.status === "disconnected" ? "disconnected" : "active",
+    credential_ciphertext: row.credential_ciphertext == null ? null : String(row.credential_ciphertext),
+    external_account_label: row.external_account_label == null ? null : String(row.external_account_label),
+    scope: row.scope == null ? null : String(row.scope),
+    created_at: asDate(row.created_at),
+  };
+}
+
+function mapGrant(row: Raw): GrantRow {
+  return {
+    grant_id: String(row.grant_id),
+    connection_id: String(row.connection_id),
+    kind: row.kind === "folder" ? "folder" : "file",
+    external_id: String(row.external_id),
+    name: String(row.name),
+    granted_at: asDate(row.granted_at),
+  };
+}
+
+function mapAccessRequest(row: Raw): AccessRequestRow {
+  const status = row.status === "approved" || row.status === "denied" ? row.status : "pending";
+  return {
+    request_id: String(row.request_id),
+    connection_id: String(row.connection_id),
+    external_id: String(row.external_id),
+    kind: row.kind === "folder" ? "folder" : "file",
+    capability_id: String(row.capability_id),
+    status,
+    approval_token: String(row.approval_token),
+    created_at: asDate(row.created_at),
+    decided_at: asDateOrNull(row.decided_at),
   };
 }
 

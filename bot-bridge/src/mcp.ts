@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import type { Access } from "./access.js";
 import type { Bridge } from "./bridge.js";
 import { INSTRUCTIONS, PLAYBOOK } from "./playbook.js";
 import type { Err } from "./result.js";
@@ -8,7 +9,55 @@ import { AUTH_SCHEMES, LINK_STATUSES, type BotRow } from "./types.js";
 
 const VERSION = "1.0.0";
 
-export function createMcpServer(bridge: Bridge, bot: BotRow, baseUrl: string): McpServer {
+const DRIVE_TOOLS: Record<string, { title: string; description: string; input: Record<string, z.ZodType> }> = {
+  drive_list_folder: {
+    title: "List Drive folder",
+    description: "List files granted on this bot's Google Drive card, or the contents of a granted folder.",
+    input: { folder_id: z.string().optional().describe("Folder id. Omit to list ticked items.") },
+  },
+  drive_search: {
+    title: "Search Drive",
+    description: "Search names inside this bot's granted Drive files and folders.",
+    input: { query: z.string().describe("Name fragment to search for.") },
+  },
+  drive_get_metadata: {
+    title: "Drive metadata",
+    description: "Metadata for a file the bot is allowed to read.",
+    input: { file_id: z.string().describe("Drive file id.") },
+  },
+  drive_read_file: {
+    title: "Read Drive file",
+    description: "Read text from a granted Drive file.",
+    input: { file_id: z.string().describe("Drive file id.") },
+  },
+  drive_create_folder: {
+    title: "Create Drive folder",
+    description: "Create a folder inside a granted folder.",
+    input: { name: z.string(), parent_id: z.string() },
+  },
+  drive_upload_file: {
+    title: "Upload Drive file",
+    description: "Upload text into a granted folder.",
+    input: { name: z.string(), content: z.string(), parent_id: z.string() },
+  },
+  drive_update_file: {
+    title: "Update Drive file",
+    description: "Replace the text of a granted file.",
+    input: { file_id: z.string(), content: z.string() },
+  },
+  drive_rename_file: {
+    title: "Rename Drive file",
+    description: "Rename a granted file or folder.",
+    input: { file_id: z.string(), new_name: z.string() },
+  },
+  drive_trash_file: {
+    title: "Trash Drive file",
+    description: "Move a granted file or folder to trash.",
+    input: { file_id: z.string() },
+  },
+};
+
+export async function createMcpServer(bridge: Bridge, access: Access, bot: BotRow, baseUrl: string): Promise<McpServer> {
   const server = new McpServer(
     { name: "bot-bridge", version: VERSION },
     { instructions: INSTRUCTIONS },
@@ -223,6 +272,26 @@ export function createMcpServer(bridge: Bridge, bot: BotRow, baseUrl: string): M
     async (args) =>
       jsonResult(await bridge.revokeLink(bot, { linkId: args.link_id, purge: args.purge_messages ?? false }, bot.bot_id)),
   );
+
+  server.registerTool(
+    "list_access",
+    {
+      title: "List access",
+      description: "List this bot's integration cards, the actions enabled on each card, and the resources granted on them. Credentials are never included.",
+      annotations: { readOnlyHint: true },
+    },
+    async () => jsonResult(await access.catalog(bot)),
+  );
+
+  for (const name of await access.toolNames(bot)) {
+    const spec = DRIVE_TOOLS[name];
+    if (!spec) continue;
+    server.registerTool(
+      name,
+      { title: spec.title, description: spec.description, inputSchema: spec.input },
+      async (args) => jsonResult(await access.call(bot, name, args as Record<string, unknown>, baseUrl)),
+    );
+  }
 
   server.registerPrompt(
     "untrusted_peer_mail",

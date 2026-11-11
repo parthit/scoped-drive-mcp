@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vit
 import { runWithScheduler } from "../src/background.js";
 import { createApp } from "../src/app.js";
 import { Bridge } from "../src/bridge.js";
+import { newId } from "../src/ids.js";
 import type { WebhookFeature } from "../src/limits.js";
 import type { WebhookPostInput } from "../src/notify/webhook.js";
 import { signWake } from "../src/notify/webhook.js";
@@ -31,6 +32,12 @@ const feature: WebhookFeature = {
 function must<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(`${result.error}: ${result.message}`);
   return result.data;
+}
+
+async function person(store: Store, app: Bridge, name: string) {
+  const user = { user_id: newId("usr"), email: null, created_at: new Date("2026-01-01T00:00:00.000Z") };
+  await store.insertUser(user);
+  return must(await app.register({ displayName: name, userId: user.user_id }, BASE));
 }
 
 function tokenOf(url: string | undefined): string {
@@ -88,8 +95,8 @@ function registerWebhookTests(label: string, openStore: () => Promise<Store>): v
     }
 
     async function active(app: Bridge) {
-      const a = must(await app.register({ displayName: "Alex" }, BASE));
-      const b = must(await app.register({ displayName: "Blair" }, BASE));
+      const a = await person(store, app, "Alex");
+      const b = await person(store, app, "Blair");
       const alex = (await app.authenticate(a.token)) as BotRow;
       const blair = (await app.authenticate(b.token)) as BotRow;
       const invite = must(await app.requestLink(alex, {}, BASE));
@@ -359,7 +366,7 @@ describe("webhook http", () => {
       lookup,
       schedule: () => undefined,
     });
-    const registered = must(await app.register({ displayName: "Blair" }, BASE));
+    const registered = await person(store, app, "Blair");
     const blair = (await app.authenticate(registered.token))!;
     const settings = must(await app.getWebhook(blair, BASE));
     const http = createApp({
@@ -411,7 +418,7 @@ describe("webhook http", () => {
   test("rotating the settings link kills the old url", async () => {
     const store = new MemoryStore();
     const app = new Bridge(store, { webhooks: feature, lookup, schedule: () => undefined });
-    const registered = must(await app.register({ displayName: "Blair" }, BASE));
+    const registered = await person(store, app, "Blair");
     const blair = (await app.authenticate(registered.token))!;
     const settings = must(await app.getWebhook(blair, BASE));
     const http = createApp({ store, baseUrl: BASE, webhooks: feature, lookup });
@@ -441,6 +448,14 @@ describe("webhook http", () => {
       baseUrl: BASE,
       webhookDrainToken: "drain-secret",
       webhooks: { ...feature, enabled: false, kek: null },
+      sessionSecret: "test-session-secret",
+      oauth: { google: { clientId: "gid", clientSecret: "gsecret" } },
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.includes("token")) return Response.json({ access_token: "token" });
+        if (url.includes("userinfo")) return Response.json({ sub: "ada", email: "ada@example.com" });
+        return new Response("missing", { status: 404 });
+      },
     });
     const missing = await off.request(`${BASE}/internal/webhook-drain`, { method: "POST" });
     expect(missing.status).toBe(401);
@@ -449,9 +464,16 @@ describe("webhook http", () => {
       headers: { authorization: "Bearer nope" },
     });
     expect(wrong.status).toBe(401);
+    const start = await off.request(`${BASE}/auth/google`);
+    const state = new globalThis.URL(start.headers.get("location") ?? "", "https://accounts.google.com").searchParams.get("state") ?? "";
+    const oauthCookie = start.headers.getSetCookie().find((item) => item.startsWith("bb_oauth="))?.split(";")[0] ?? "";
+    const callback = await off.request(`${BASE}/auth/google/callback?code=ada&state=${encodeURIComponent(state)}`, {
+      headers: { cookie: oauthCookie },
+    });
+    const session = callback.headers.getSetCookie().find((item) => item.startsWith("bb_session="))?.split(";")[0] ?? "";
     const alex = await off.request(`${BASE}/register`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
+      headers: { "content-type": "application/json", accept: "application/json", cookie: session },
       body: JSON.stringify({ display_name: "Alex" }),
     });
     const token = ((await alex.json()) as { token: string }).token;
