@@ -33,8 +33,8 @@ Extra surface beyond the plan's tool list: `whoami`, an MCP prompt and resource 
 
 Do this once per person, in that person's own bot account.
 
-1. Open the deployed site (or `http://127.0.0.1:4471` locally) and choose **Register a bot**.
-2. Enter a display name the other person will recognize. Email is optional.
+1. Open the deployed site (or `http://127.0.0.1:4471` locally) and choose **Sign in**. Google, GitHub, and X are account logins. None of them connects Google Drive.
+2. Choose **Create a bot**. Enter a display name the other person will recognize. Each bot gets its own id and mailbox. Creating another bot on the same account does not share the first bot's mail or integration cards.
 3. Copy the **connector URL**. It looks like `https://YOUR_HOST/mcp/bb_...`. The token is shown only on this page.
 4. In the bot's connector settings, add a remote MCP server and paste that URL.
 5. If the product has separate URL and header fields, prefer that. Access logs can record a token that sits in the path.
@@ -147,6 +147,14 @@ See `.env.example`.
 | `WEBHOOK_MAX_PER_BOT_PER_HOUR` | No | Default 60. Extra pings wait until the next hour. The message is already in the inbox. |
 | `WEBHOOK_ATTEMPT_TIMEOUT_MS` | No | Default 4000. |
 | `WEBHOOK_MAX_ATTEMPTS` | No | Default 5. |
+| `SESSION_SECRET` | To sign in | Signs the account session cookie. |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | For Google login | Login scope is `openid email profile`. Redirect URI: `https://YOUR_HOST/auth/google/callback`. |
+| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | For GitHub login | Scopes `read:user` and `user:email`. Redirect URI: `https://YOUR_HOST/auth/github/callback`. |
+| `X_OAUTH_CLIENT_ID` / `X_OAUTH_CLIENT_SECRET` | For X login | OAuth 2.0 with PKCE. Redirect URI: `https://YOUR_HOST/auth/x/callback`. |
+| `ENCRYPTION_KEY` | To connect Drive | Encrypts a bot's Google Drive refresh token. |
+| `GOOGLE_DRIVE_OAUTH_CLIENT_ID` / `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` | No | Overrides the Google login client for the Drive card. Redirect URI: `https://YOUR_HOST/integrations/google-drive/callback`. |
+
+A bot's **Integrations** tab has a Google Drive card. Connecting it is a separate consent from login. List and read are on unless you clear them. Write, rename, and trash stay off until that card's Drive consent includes write access. Ticked folders include their contents. Anything else returns an approval link for that bot only. The bot sees this catalog from `list_access`. Drive tools appear only for actions enabled on that card.
 
 Bot tokens are stored as SHA-256 hashes. Approval tokens and manage tokens are stored so the same human URL can be shown again until it is used, refreshed, or expires. Do not put message bodies in log drains.
 

@@ -1,14 +1,23 @@
+import { getCookie, setCookie } from "hono/cookie";
 import { cors } from "hono/cors";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { Access, type DriveClientConfig } from "./access.js";
+import { Accounts } from "./accounts.js";
 import { Bridge } from "./bridge.js";
 import type { Scheduler } from "./background.js";
 import type { WebhookTransport } from "./notify/webhook.js";
 import type { DnsLookup } from "./ssrf.js";
 import { createMcpServer } from "./mcp.js";
+import { authorizationUrl, codeChallenge, codeVerifier, exchangeCode, isLoginProvider, type OAuthConfig } from "./oauth.js";
 import {
+  accessRequestPage,
+  accountPage,
   approvalPage,
   approvalResultPage,
+  botPage,
+  driveBrowsePage,
   homePage,
+  loginPage,
   manageDonePage,
   managePage,
   messagePage,
@@ -18,10 +27,12 @@ import {
   settingsPage,
   settingsRotatedPage,
 } from "./pages.js";
+import { newCsrf, openSealed, openSession, seal, type SessionPayload } from "./session.js";
 import { PLAYBOOK } from "./playbook.js";
 import { safeEqual, sha256 } from "./ids.js";
 import { limitsFromEnv, webhookFeatureFromEnv, type Limits, type WebhookFeature } from "./limits.js";
 import { createDefaultStore, type Store } from "./store/index.js";
+import type { BotRow } from "./types.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
 const VERSION = "1.0.0";
@@ -40,6 +51,11 @@ export type AppDeps = {
   postWebhook?: WebhookTransport;
   schedule?: Scheduler;
   registerPerHour?: number;
+  sessionSecret?: string | null;
+  oauth?: OAuthConfig;
+  fetch?: typeof fetch;
+  encryptionKey?: string | null;
+  googleDrive?: DriveClientConfig | null;
 };
 
 export function createApp(deps: AppDeps): Hono {
@@ -50,6 +66,17 @@ export function createApp(deps: AppDeps): Hono {
     lookup: deps.lookup,
     postWebhook: deps.postWebhook,
     schedule: deps.schedule,
+  });
+  const accounts = new Accounts(deps.store, deps.now);
+  const oauth = deps.oauth ?? oauthFromEnv();
+  const sessionSecret = deps.sessionSecret !== undefined ? deps.sessionSecret : process.env.SESSION_SECRET?.trim() || null;
+  const fetchImpl = deps.fetch ?? fetch;
+  const googleDrive = deps.googleDrive !== undefined ? deps.googleDrive : driveClientFromEnv(oauth);
+  const access = new Access(deps.store, {
+    now: deps.now,
+    encryptionKey: deps.encryptionKey !== undefined ? deps.encryptionKey ?? "" : process.env.ENCRYPTION_KEY?.trim() || "",
+    fetch: fetchImpl,
+    googleDrive,
   });
   const auditToken = deps.auditToken !== undefined ? deps.auditToken : process.env.AUDIT_TOKEN?.trim() || null;
   const sweepToken = deps.sweepToken !== undefined ? deps.sweepToken : process.env.SWEEP_TOKEN?.trim() || null;
@@ -75,7 +102,58 @@ export function createApp(deps: AppDeps): Hono {
   app.use("/mcp", corsMw);
   app.use("/mcp/*", corsMw);
 
-  app.get("/", (c) => html(c, homePage()));
+  app.get("/", async (c) => {
+    const session = readSession(c, sessionSecret);
+    if (!session) return html(c, homePage());
+    const bots = await deps.store.listBotsForUser(session.user_id);
+    return html(c, accountPage(bots.map((bot) => ({ bot_id: bot.bot_id, display_name: bot.display_name }))));
+  });
+
+  app.get("/login", (c) => html(c, loginPage(loginLinks(oauth))));
+
+  app.post("/logout", (c) => {
+    setCookie(c, "bb_session", "", cookieOptions(base(c, deps.baseUrl), 0));
+    return c.redirect("/", 303);
+  });
+
+  app.get("/auth/:provider", (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginProvider(provider) || !oauth[provider] || !sessionSecret) {
+      return html(c, loginPage(loginLinks(oauth), "That login is not configured."), 400);
+    }
+    const verifier = codeVerifier();
+    const state = seal(sessionSecret, { provider, verifier, exp: Date.now() + 10 * 60 * 1000, purpose: "login" });
+    setCookie(c, "bb_oauth", state, cookieOptions(base(c, deps.baseUrl), 600));
+    const redirectUri = `${base(c, deps.baseUrl)}/auth/${provider}/callback`;
+    return c.redirect(authorizationUrl(provider, oauth[provider], redirectUri, state, codeChallenge(verifier)), 302);
+  });
+
+  app.get("/auth/:provider/callback", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginProvider(provider) || !oauth[provider] || !sessionSecret) {
+      return html(c, messagePage("Sign-in failed", "That login is not configured."), 400);
+    }
+    const sealed = getCookie(c, "bb_oauth") ?? "";
+    const pending = openOAuthState(sessionSecret, sealed);
+    const state = c.req.query("state") ?? "";
+    const code = c.req.query("code") ?? "";
+    if (!pending || pending.provider !== provider || pending.purpose !== "login" || state !== sealed || !code) {
+      return html(c, messagePage("Sign-in failed", "Start the sign-in again."), 400);
+    }
+    let profile;
+    try {
+      profile = await exchangeCode(provider, oauth[provider], `${base(c, deps.baseUrl)}/auth/${provider}/callback`, code, pending.verifier, fetchImpl);
+    } catch {
+      return html(c, messagePage("Sign-in failed", "The login provider did not confirm this account."), 400);
+    }
+    const current = readSession(c, sessionSecret);
+    const result = await accounts.completeLogin(profile, current?.user_id ?? null);
+    setCookie(c, "bb_oauth", "", cookieOptions(base(c, deps.baseUrl), 0));
+    if (!result.ok) return html(c, messagePage("Sign-in failed", result.message), 409);
+    const payload: SessionPayload = { user_id: result.data.user_id, csrf: newCsrf(), exp: Date.now() + 8 * 60 * 60 * 1000 };
+    setCookie(c, "bb_session", seal(sessionSecret, payload), cookieOptions(base(c, deps.baseUrl), 8 * 60 * 60));
+    return c.redirect("/", 303);
+  });
   app.get("/playbook", (c) => {
     if (wantsJson(c)) return c.text(PLAYBOOK);
     return html(c, playbookPage());
@@ -90,8 +168,16 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
 
-  app.get("/register", (c) => html(c, registerPage()));
+  app.get("/register", (c) => {
+    if (!readSession(c, sessionSecret)) return c.redirect("/login", 303);
+    return html(c, registerPage());
+  });
   app.post("/register", async (c) => {
+    const session = readSession(c, sessionSecret);
+    if (!session) {
+      if (wantsJson(c)) return c.json({ error: "account_required", message: "Sign in before creating a bot." }, 401);
+      return c.redirect("/login", 303);
+    }
     if (!(await allowRegister(deps.store, clientIp(c), registerPerHour, new Date()))) {
       const message = "Too many registrations from this network. Try again later.";
       if (wantsJson(c)) return c.json({ error: "rate_limited", message }, 429);
@@ -103,7 +189,7 @@ export function createApp(deps: AppDeps): Hono {
       return html(c, registerPage(body.message), 400);
     }
     const result = await bridge.register(
-      { displayName: stringField(body.value, "display_name") ?? stringField(body.value, "displayName") ?? "", email: stringField(body.value, "email") },
+      { displayName: stringField(body.value, "display_name") ?? stringField(body.value, "displayName") ?? "", userId: session.user_id },
       base(c, deps.baseUrl),
     );
     if (!result.ok) {
@@ -240,10 +326,131 @@ export function createApp(deps: AppDeps): Hono {
     return html(c, settingsPage(saved.data));
   });
 
+  app.get("/bots/:botId", async (c) => {
+    const owned = await ownedBot(c, deps.store, sessionSecret);
+    if (!owned.ok) return owned.response;
+    const connection = await deps.store.findConnection(owned.bot.bot_id, "google_drive");
+    const capabilities = connection ? await deps.store.listCapabilities(connection.connection_id) : [];
+    const grants = connection ? await deps.store.listGrants(connection.connection_id) : [];
+    return html(
+      c,
+      botPage({
+        botId: owned.bot.bot_id,
+        displayName: owned.bot.display_name,
+        csrf: owned.session.csrf,
+        drive: connection
+          ? { connected: connection.status === "active", label: connection.external_account_label, capabilities, grants }
+          : { connected: false, label: null, capabilities: [], grants: [] },
+      }),
+    );
+  });
+
+  app.post("/bots/:botId/drive/connect", async (c) => {
+    const owned = await ownedBot(c, deps.store, sessionSecret);
+    if (!owned.ok) return owned.response;
+    const body = await readObject(c);
+    if (!body.ok || !csrfOk(body.value, owned.session)) return html(c, messagePage("Missing token", "Submit the form again."), 400);
+    if (!sessionSecret) return html(c, messagePage("Not configured", "Set SESSION_SECRET before connecting Drive."), 400);
+    const capabilities = stringList(body.value, "capability");
+    const verifier = codeVerifier();
+    const state = seal(sessionSecret, { provider: "google_drive", verifier, exp: Date.now() + 10 * 60 * 1000, purpose: "drive", bot_id: owned.bot.bot_id, capabilities });
+    const redirectUri = `${base(c, deps.baseUrl)}/integrations/google-drive/callback`;
+    const url = access.driveConnectUrl({ redirectUri, state, challenge: codeChallenge(verifier), capabilities });
+    if (!url.ok) return html(c, messagePage("Drive is not configured", url.message), 400);
+    setCookie(c, "bb_oauth", state, cookieOptions(base(c, deps.baseUrl), 600));
+    return c.redirect(url.data, 302);
+  });
+
+  app.get("/integrations/google-drive/callback", async (c) => {
+    const session = readSession(c, sessionSecret);
+    if (!session || !sessionSecret) return c.redirect("/login", 303);
+    const sealed = getCookie(c, "bb_oauth") ?? "";
+    const pending = openOAuthState(sessionSecret, sealed);
+    const code = c.req.query("code") ?? "";
+    if (!pending || pending.purpose !== "drive" || c.req.query("state") !== sealed || !code || !pending.bot_id) {
+      return html(c, messagePage("Drive connection failed", "Start the Drive connection again."), 400);
+    }
+    const bot = await deps.store.findBotById(pending.bot_id);
+    if (!bot || bot.user_id !== session.user_id) return html(c, messagePage("Drive connection failed", "That bot is not on this account."), 403);
+    const result = await access.finishDriveConnect({
+      bot,
+      code,
+      verifier: pending.verifier,
+      redirectUri: `${base(c, deps.baseUrl)}/integrations/google-drive/callback`,
+      capabilities: pending.capabilities,
+    });
+    setCookie(c, "bb_oauth", "", cookieOptions(base(c, deps.baseUrl), 0));
+    if (!result.ok) return html(c, messagePage("Drive connection failed", result.message), 400);
+    return c.redirect(`/bots/${bot.bot_id}`, 303);
+  });
+
+  app.post("/bots/:botId/drive/capabilities", async (c) => {
+    const owned = await ownedBot(c, deps.store, sessionSecret);
+    if (!owned.ok) return owned.response;
+    const body = await readObject(c);
+    if (!body.ok || !csrfOk(body.value, owned.session)) return html(c, messagePage("Missing token", "Submit the form again."), 400);
+    const result = await access.setCapabilities(owned.bot, stringList(body.value, "capability"));
+    if (!result.ok) {
+      return html(c, botPage({ botId: owned.bot.bot_id, displayName: owned.bot.display_name, csrf: owned.session.csrf, drive: null, error: result.message }), 400);
+    }
+    return c.redirect(`/bots/${owned.bot.bot_id}`, 303);
+  });
+
+  app.get("/bots/:botId/drive", async (c) => {
+    const owned = await ownedBot(c, deps.store, sessionSecret);
+    if (!owned.ok) return owned.response;
+    const folder = c.req.query("folder") || undefined;
+    const listed = await access.browse(owned.bot, folder);
+    if (!listed.ok) return html(c, messagePage("Drive browse failed", listed.message), 400);
+    return html(c, driveBrowsePage({ botId: owned.bot.bot_id, csrf: owned.session.csrf, folderId: folder ?? null, resources: listed.data.resources }));
+  });
+
+  app.post("/bots/:botId/grants", async (c) => {
+    const owned = await ownedBot(c, deps.store, sessionSecret);
+    if (!owned.ok) return owned.response;
+    const body = await readObject(c);
+    if (!body.ok || !csrfOk(body.value, owned.session)) return html(c, messagePage("Missing token", "Submit the form again."), 400);
+    const externalId = stringField(body.value, "external_id") ?? "";
+    const name = stringField(body.value, "name") ?? externalId;
+    const kind = stringField(body.value, "kind") === "folder" ? "folder" : "file";
+    const result = await access.grant(owned.bot, { kind, externalId, name });
+    if (!result.ok) return html(c, messagePage("Grant failed", result.message), 400);
+    return c.redirect(`/bots/${owned.bot.bot_id}`, 303);
+  });
+
+  app.post("/bots/:botId/grants/:grantId/revoke", async (c) => {
+    const owned = await ownedBot(c, deps.store, sessionSecret);
+    if (!owned.ok) return owned.response;
+    const body = await readObject(c);
+    if (!body.ok || !csrfOk(body.value, owned.session)) return html(c, messagePage("Missing token", "Submit the form again."), 400);
+    await access.revokeGrant(owned.bot, c.req.param("grantId"));
+    return c.redirect(`/bots/${owned.bot.bot_id}`, 303);
+  });
+
+  app.get("/access/:token", async (c) => {
+    const session = readSession(c, sessionSecret);
+    const view = await access.approvalFor(c.req.param("token"), session?.user_id ?? null);
+    if (!view.ok) return html(c, messagePage("Approval unavailable", view.message), view.error === "forbidden" ? 403 : 404);
+    return html(c, accessRequestPage({ externalId: view.data.external_id, kind: view.data.kind, status: view.data.status, csrf: session?.csrf ?? "" }));
+  });
+
+  app.post("/access/:token", async (c) => {
+    const session = readSession(c, sessionSecret);
+    if (!session) return c.redirect("/login", 303);
+    const body = await readObject(c);
+    const decision = body.ok ? stringField(body.value, "decision") : null;
+    if (!body.ok || !csrfOk(body.value, session) || (decision !== "approve" && decision !== "deny")) {
+      return html(c, messagePage("Missing decision", "Choose approve or deny."), 400);
+    }
+    const result = await access.decideAccess(c.req.param("token"), session.user_id, decision);
+    if (!result.ok) return html(c, messagePage("Approval not recorded", result.message), 400);
+    return html(c, messagePage("Drive access updated", `The request is ${result.data.status}.`));
+  });
+
   app.on(["GET", "DELETE"], "/mcp", (c) => methodNotAllowed(c));
   app.on(["GET", "DELETE"], "/mcp/:token", (c) => methodNotAllowed(c));
-  app.post("/mcp", (c) => handleMcp(c, bridge, base(c, deps.baseUrl)));
-  app.post("/mcp/:token", (c) => handleMcp(c, bridge, base(c, deps.baseUrl)));
+  app.post("/mcp", (c) => handleMcp(c, bridge, access, base(c, deps.baseUrl)));
+  app.post("/mcp/:token", (c) => handleMcp(c, bridge, access, base(c, deps.baseUrl)));
 
   app.notFound((c) => {
     if (wantsJson(c)) return c.json({ error: "not_found", message: "No such page." }, 404);
@@ -267,6 +474,7 @@ async function handleMcp(
     };
   },
   bridge: Bridge,
+  access: Access,
   baseUrl: string,
 ): Promise<Response> {
   const pathToken = c.req.param("token");
@@ -275,7 +483,7 @@ async function handleMcp(
   const token = pathToken || headerToken;
   const bot = token ? await bridge.authenticate(token) : null;
   if (!bot) return unauthenticated();
-  const server = createMcpServer(bridge, bot, baseUrl);
+  const server = await createMcpServer(bridge, access, bot, baseUrl);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -399,6 +607,76 @@ function bearerMatches(authorization: string | undefined, expected: string): boo
   const token = tokenFromHeader(authorization, undefined);
   if (!token) return false;
   return safeEqual(token, expected);
+}
+
+function cookieOptions(baseUrl: string, maxAge: number): { httpOnly: true; sameSite: "Lax"; path: "/"; secure: boolean; maxAge: number } {
+  return { httpOnly: true, sameSite: "Lax", path: "/", secure: baseUrl.startsWith("https:"), maxAge };
+}
+
+function readSession(c: { req: { header: (name: string) => string | undefined } }, secret: string | null): SessionPayload | null {
+  if (!secret) return null;
+  const token = getCookie(c as never, "bb_session");
+  if (!token) return null;
+  return openSession(secret, token, new Date());
+}
+
+function loginLinks(oauth: OAuthConfig): Array<{ href: string; label: string }> {
+  const links: Array<{ href: string; label: string }> = [];
+  if (oauth.google) links.push({ href: "/auth/google", label: "Continue with Google" });
+  if (oauth.github) links.push({ href: "/auth/github", label: "Continue with GitHub" });
+  if (oauth.x) links.push({ href: "/auth/x", label: "Continue with X" });
+  return links;
+}
+
+function oauthFromEnv(): OAuthConfig {
+  const config: OAuthConfig = {};
+  const googleId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
+  const googleSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+  if (googleId && googleSecret) config.google = { clientId: googleId, clientSecret: googleSecret };
+  const githubId = process.env.GITHUB_OAUTH_CLIENT_ID?.trim();
+  const githubSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET?.trim();
+  if (githubId && githubSecret) config.github = { clientId: githubId, clientSecret: githubSecret };
+  const xId = process.env.X_OAUTH_CLIENT_ID?.trim();
+  const xSecret = process.env.X_OAUTH_CLIENT_SECRET?.trim();
+  if (xId && xSecret) config.x = { clientId: xId, clientSecret: xSecret };
+  return config;
+}
+
+function driveClientFromEnv(oauth: OAuthConfig): DriveClientConfig | null {
+  const id = process.env.GOOGLE_DRIVE_OAUTH_CLIENT_ID?.trim() || oauth.google?.clientId;
+  const secret = process.env.GOOGLE_DRIVE_OAUTH_CLIENT_SECRET?.trim() || oauth.google?.clientSecret;
+  if (!id || !secret) return null;
+  return { clientId: id, clientSecret: secret };
+}
+
+function openOAuthState(secret: string, token: string): { provider: string; verifier: string; purpose: string; bot_id?: string; capabilities: string[] } | null {
+  const parsed = openSealed(secret, token, new Date());
+  if (!parsed || typeof parsed.provider !== "string" || typeof parsed.verifier !== "string" || typeof parsed.purpose !== "string") return null;
+  const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities.filter((item): item is string => typeof item === "string") : [];
+  return { provider: parsed.provider, verifier: parsed.verifier, purpose: parsed.purpose, bot_id: typeof parsed.bot_id === "string" ? parsed.bot_id : undefined, capabilities };
+}
+
+async function ownedBot(
+  c: Context,
+  store: Store,
+  secret: string | null,
+): Promise<{ ok: true; session: SessionPayload; bot: BotRow } | { ok: false; response: Response }> {
+  const session = readSession(c, secret);
+  if (!session) return { ok: false, response: c.redirect("/login", 303) };
+  const bot = await store.findBotById(c.req.param("botId") ?? "");
+  if (!bot || bot.user_id !== session.user_id) return { ok: false, response: c.json({ error: "not_found", message: "That bot is not on this account." }, 404) };
+  return { ok: true, session, bot };
+}
+
+function csrfOk(body: Record<string, unknown>, session: SessionPayload): boolean {
+  return stringField(body, "csrf") === session.csrf;
+}
+
+function stringList(body: Record<string, unknown>, key: string): string[] {
+  const value = body[key];
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  return [];
 }
 
 function statusFor(error: string): 400 | 401 | 404 | 409 | 429 {

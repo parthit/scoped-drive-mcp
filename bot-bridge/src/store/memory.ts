@@ -1,4 +1,4 @@
-import { deriveStatus, type ApprovalRow, type AuditRow, type BotRow, type DeliveryRow, type InboxFilter, type LinkRow, type ManageRow, type MessageRow, type NotifierKind, type NotifierRow, type SettingsTokenRow, type Side, type UserRow } from "../types.js";
+import { deriveStatus, type AccessRequestRow, type ApprovalRow, type AuditRow, type BotRow, type ConnectionRow, type DeliveryRow, type GrantRow, type IdentityRow, type InboxFilter, type LinkRow, type ManageRow, type MessageRow, type NotifierKind, type NotifierRow, type SettingsTokenRow, type Side, type UserRow } from "../types.js";
 import type { Store } from "./types.js";
 
 function copy<T>(row: T): T {
@@ -9,7 +9,12 @@ export class MemoryStore implements Store {
   readonly kind = "memory" as const;
   private queue: Promise<void> = Promise.resolve();
   private users = new Map<string, UserRow>();
+  private identities = new Map<string, IdentityRow>();
   private bots = new Map<string, BotRow>();
+  private connections = new Map<string, ConnectionRow>();
+  private capabilities = new Map<string, string[]>();
+  private grants = new Map<string, GrantRow>();
+  private accessRequests = new Map<string, AccessRequestRow>();
   private botsByHash = new Map<string, string>();
   private links = new Map<string, LinkRow>();
   private approvals = new Map<string, ApprovalRow>();
@@ -34,7 +39,12 @@ export class MemoryStore implements Store {
 
   async clearAll(): Promise<void> {
     this.users.clear();
+    this.identities.clear();
     this.bots.clear();
+    this.connections.clear();
+    this.capabilities.clear();
+    this.grants.clear();
+    this.accessRequests.clear();
     this.botsByHash.clear();
     this.links.clear();
     this.approvals.clear();
@@ -49,6 +59,27 @@ export class MemoryStore implements Store {
 
   async insertUser(row: UserRow): Promise<void> {
     this.users.set(row.user_id, copy(row));
+  }
+
+  async findUser(id: string): Promise<UserRow | null> {
+    const user = this.users.get(id);
+    return user ? copy(user) : null;
+  }
+
+  async insertIdentity(row: IdentityRow): Promise<"ok" | "conflict"> {
+    const key = `${row.provider}:${row.provider_user_id}`;
+    if (this.identities.has(key)) return "conflict";
+    this.identities.set(key, copy(row));
+    return "ok";
+  }
+
+  async findIdentity(provider: string, providerUserId: string): Promise<IdentityRow | null> {
+    const row = this.identities.get(`${provider}:${providerUserId}`);
+    return row ? copy(row) : null;
+  }
+
+  async listIdentities(userId: string): Promise<IdentityRow[]> {
+    return [...this.identities.values()].filter((row) => row.user_id === userId).map((row) => copy(row));
   }
 
   async insertBot(row: BotRow): Promise<void> {
@@ -66,6 +97,91 @@ export class MemoryStore implements Store {
   async findBotById(id: string): Promise<BotRow | null> {
     const bot = this.bots.get(id);
     return bot ? copy(bot) : null;
+  }
+
+  async listBotsForUser(userId: string): Promise<BotRow[]> {
+    return [...this.bots.values()]
+      .filter((row) => row.user_id === userId)
+      .sort((a, b) => a.created_at.getTime() - b.created_at.getTime())
+      .map((row) => copy(row));
+  }
+
+  async insertConnection(row: ConnectionRow): Promise<"ok" | "conflict"> {
+    for (const existing of this.connections.values()) {
+      if (existing.bot_id === row.bot_id && existing.provider === row.provider) return "conflict";
+    }
+    this.connections.set(row.connection_id, copy(row));
+    return "ok";
+  }
+
+  async findConnectionById(id: string): Promise<ConnectionRow | null> {
+    const row = this.connections.get(id);
+    return row ? copy(row) : null;
+  }
+
+  async findConnection(botId: string, provider: string): Promise<ConnectionRow | null> {
+    for (const row of this.connections.values()) {
+      if (row.bot_id === botId && row.provider === provider) return copy(row);
+    }
+    return null;
+  }
+
+  async listConnections(botId: string): Promise<ConnectionRow[]> {
+    return [...this.connections.values()].filter((row) => row.bot_id === botId).map((row) => copy(row));
+  }
+
+  async updateConnection(row: ConnectionRow): Promise<void> {
+    this.connections.set(row.connection_id, copy(row));
+  }
+
+  async setCapabilities(connectionId: string, capabilityIds: string[]): Promise<void> {
+    this.capabilities.set(connectionId, [...new Set(capabilityIds)]);
+  }
+
+  async listCapabilities(connectionId: string): Promise<string[]> {
+    return [...(this.capabilities.get(connectionId) ?? [])];
+  }
+
+  async insertGrant(row: GrantRow): Promise<"ok" | "exists"> {
+    for (const existing of this.grants.values()) {
+      if (existing.connection_id === row.connection_id && existing.external_id === row.external_id) return "exists";
+    }
+    this.grants.set(row.grant_id, copy(row));
+    return "ok";
+  }
+
+  async listGrants(connectionId: string): Promise<GrantRow[]> {
+    return [...this.grants.values()]
+      .filter((row) => row.connection_id === connectionId)
+      .sort((a, b) => a.granted_at.getTime() - b.granted_at.getTime())
+      .map((row) => copy(row));
+  }
+
+  async deleteGrant(connectionId: string, grantId: string): Promise<void> {
+    const row = this.grants.get(grantId);
+    if (row?.connection_id === connectionId) this.grants.delete(grantId);
+  }
+
+  async insertAccessRequest(row: AccessRequestRow): Promise<void> {
+    this.accessRequests.set(row.request_id, copy(row));
+  }
+
+  async findPendingAccessRequest(connectionId: string, externalId: string): Promise<AccessRequestRow | null> {
+    for (const row of this.accessRequests.values()) {
+      if (row.connection_id === connectionId && row.external_id === externalId && row.status === "pending") return copy(row);
+    }
+    return null;
+  }
+
+  async findAccessRequestByToken(token: string): Promise<AccessRequestRow | null> {
+    for (const row of this.accessRequests.values()) {
+      if (row.approval_token === token) return copy(row);
+    }
+    return null;
+  }
+
+  async updateAccessRequest(row: AccessRequestRow): Promise<void> {
+    this.accessRequests.set(row.request_id, copy(row));
   }
 
   async lockBot(_botId: string): Promise<void> {}

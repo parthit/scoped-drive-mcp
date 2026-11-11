@@ -10,6 +10,46 @@ export type UserRow = {
   created_at: Date;
 };
 
+export type IdentityRow = {
+  provider: string;
+  provider_user_id: string;
+  user_id: string;
+  label: string;
+  created_at: Date;
+};
+
+export type ConnectionRow = {
+  connection_id: string;
+  bot_id: string;
+  provider: string;
+  status: "active" | "disconnected";
+  credential_ciphertext: string | null;
+  external_account_label: string | null;
+  scope: string | null;
+  created_at: Date;
+};
+
+export type GrantRow = {
+  grant_id: string;
+  connection_id: string;
+  kind: "file" | "folder";
+  external_id: string;
+  name: string;
+  granted_at: Date;
+};
+
+export type AccessRequestRow = {
+  request_id: string;
+  connection_id: string;
+  external_id: string;
+  kind: "file" | "folder";
+  capability_id: string;
+  status: "pending" | "approved" | "denied";
+  approval_token: string;
+  created_at: Date;
+  decided_at: Date | null;
+};
+
 export type BotRow = {
   bot_id: string;
   user_id: string;

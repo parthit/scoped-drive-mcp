@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { createApp } from "../src/app.js";
 import { Bridge } from "../src/bridge.js";
+import { newId } from "../src/ids.js";
 import { UNTRUSTED_START } from "../src/content.js";
 import type { Limits } from "../src/limits.js";
 import type { Result } from "../src/result.js";
@@ -51,9 +52,15 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
       now = new Date(now.getTime() + ms);
     }
 
+    async function registerPerson(app: Bridge, name: string, email?: string) {
+      const user = { user_id: newId("usr"), email: email ?? null, created_at: now };
+      await store.insertUser(user);
+      return must(await app.register({ displayName: name, userId: user.user_id }, BASE));
+    }
+
     async function bots(app: Bridge, left = "Alex", right = "Blair") {
-      const a = must(await app.register({ displayName: left, email: "alex@example.com" }, BASE));
-      const b = must(await app.register({ displayName: right }, BASE));
+      const a = await registerPerson(app, left, "alex@example.com");
+      const b = await registerPerson(app, right);
       const alex = await app.authenticate(a.token);
       const blair = await app.authenticate(b.token);
       if (!alex || !blair) throw new Error("auth failed");
@@ -78,7 +85,7 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
 
     test("rejects bad tokens and keeps the bearer token out of the audit log", async () => {
       const app = bridge();
-      const registered = must(await app.register({ displayName: "Alex", email: "alex@example.com" }, BASE));
+      const registered = await registerPerson(app, "Alex", "alex@example.com");
       expect(await app.authenticate("nope")).toBeNull();
       expect(await app.authenticate(registered.token)).toMatchObject({ bot_id: registered.bot_id, display_name: "Alex" });
       expect(must(app.whoami((await app.authenticate(registered.token)) as BotRow)).display_name).toBe("Alex");
@@ -91,7 +98,7 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
       const app = bridge();
       const { alex, invite } = await joined(app);
       const early = bridge();
-      const lone = must(await early.register({ displayName: "Casey" }, BASE));
+      const lone = await registerPerson(early, "Casey");
       const casey = (await early.authenticate(lone.token))!;
       const created = must(await early.requestLink(casey, {}, BASE));
       const tooSoon = await early.decideApproval(tokenOf(created.approval_url), "approve", BASE);
@@ -230,7 +237,7 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
     test("invite codes are single-use and approval urls stay stable until refresh or expiry", async () => {
       const app = bridge({ linkRequestsPerHour: 3 });
       const { alex, blair, invite } = await joined(app);
-      const third = must(await app.register({ displayName: "Casey" }, BASE));
+      const third = await registerPerson(app, "Casey");
       const casey = (await app.authenticate(third.token))!;
       const taken = await app.requestLink(casey, { inviteCode: invite.invite_code }, BASE);
       expect(taken.ok).toBe(false);
@@ -271,10 +278,29 @@ function registerBridgeTests(label: string, openStore: () => Promise<Store>): vo
     });
 
     test("parallel signups from one address share one cap", async () => {
-      const server = createApp({ store, baseUrl: BASE, registerPerHour: 2 });
+      const server = createApp({
+        store,
+        baseUrl: BASE,
+        registerPerHour: 2,
+        sessionSecret: "test-session-secret",
+        oauth: { google: { clientId: "gid", clientSecret: "gsecret" } },
+        fetch: async (input, init) => {
+          const url = String(input);
+          const code = new URLSearchParams(typeof init?.body === "string" ? init.body : "").get("code") ?? "ada";
+          if (url.includes("token")) return Response.json({ access_token: "token" });
+          if (url.includes("userinfo")) return Response.json({ sub: code, email: "ada@example.com" });
+          return new Response("missing", { status: 404 });
+        },
+      });
+      const start = await server.request(`${BASE}/auth/google`);
+      const state = new URL(start.headers.get("location") ?? "", "https://accounts.google.com").searchParams.get("state") ?? "";
+      const oauthCookie = start.headers.getSetCookie().find((item) => item.startsWith("bb_oauth="))?.split(";")[0] ?? "";
+      const callback = await server.request(`${BASE}/auth/google/callback?code=ada&state=${encodeURIComponent(state)}`, { headers: { cookie: oauthCookie } });
+      const cookie = callback.headers.getSetCookie().find((item) => item.startsWith("bb_session="))?.split(";")[0] ?? "";
       const headers = {
         "content-type": "application/json",
         accept: "application/json",
+        cookie,
         "x-real-ip": "198.51.100.20",
       };
       const responses = await Promise.all(

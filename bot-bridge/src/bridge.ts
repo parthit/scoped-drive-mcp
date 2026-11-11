@@ -142,34 +142,31 @@ export class Bridge {
   }
 
   async register(
-    input: { displayName: string; email?: string | null },
+    input: { displayName: string; userId?: string | null },
     baseUrl: string,
   ): Promise<Result<{ user_id: string; bot_id: string; display_name: string; token: string; mcp_url: string }>> {
     const displayName = cleanName(input.displayName);
     if (!displayName) {
       return err("invalid_input", "Display name must be 1–40 characters and cannot include line breaks.");
     }
-    const email = cleanEmail(input.email);
-    if (email && typeof email === "object") {
-      return err("invalid_input", "Email must look like a normal email address, or be left blank.");
-    }
+    if (!input.userId) return err("account_required", "Sign in before creating a bot.");
+    const owner = await this.store.findUser(input.userId);
+    if (!owner) return err("account_required", "Sign in before creating a bot.");
     const now = this.now();
     const token = randomToken("bb_");
-    const user = { user_id: newId("usr"), email, created_at: now };
     const bot: BotRow = {
       bot_id: newId("bot"),
-      user_id: user.user_id,
+      user_id: owner.user_id,
       display_name: displayName,
       token_hash: sha256(token),
       created_at: now,
     };
     await this.store.transaction(async (tx) => {
-      await tx.insertUser(user);
       await tx.insertBot(bot);
       await this.audit(tx, bot.bot_id, "register_bot", null, { bot_id: bot.bot_id, display_name: displayName });
     });
     return ok({
-      user_id: user.user_id,
+      user_id: owner.user_id,
       bot_id: bot.bot_id,
       display_name: displayName,
       token,
@@ -1235,13 +1232,6 @@ function cleanName(name: string | undefined): string | null {
   if (trimmed.length < 1 || trimmed.length > 40) return null;
   if (/[\u0000-\u001f]/.test(trimmed)) return null;
   return trimmed;
-}
-
-function cleanEmail(email: string | null | undefined): string | null | { error: true } {
-  if (email == null || email.trim() === "") return null;
-  const value = email.trim().toLowerCase();
-  if (value.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return { error: true };
-  return value;
 }
 
 function trimBase(baseUrl: string): string {

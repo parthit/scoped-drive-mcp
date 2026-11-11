@@ -1,8 +1,12 @@
 import type {
+  AccessRequestRow,
   ApprovalRow,
   AuditRow,
   BotRow,
+  ConnectionRow,
   DeliveryRow,
+  GrantRow,
+  IdentityRow,
   InboxFilter,
   LinkRow,
   ManageRow,
@@ -21,10 +25,30 @@ export interface Store {
   clearAll(): Promise<void>;
 
   insertUser(row: UserRow): Promise<void>;
+  findUser(id: string): Promise<UserRow | null>;
+  insertIdentity(row: IdentityRow): Promise<"ok" | "conflict">;
+  findIdentity(provider: string, providerUserId: string): Promise<IdentityRow | null>;
+  listIdentities(userId: string): Promise<IdentityRow[]>;
   insertBot(row: BotRow): Promise<void>;
   findBotByTokenHash(hash: string): Promise<BotRow | null>;
   findBotById(id: string): Promise<BotRow | null>;
+  listBotsForUser(userId: string): Promise<BotRow[]>;
   lockBot(botId: string): Promise<void>;
+
+  insertConnection(row: ConnectionRow): Promise<"ok" | "conflict">;
+  findConnectionById(id: string): Promise<ConnectionRow | null>;
+  findConnection(botId: string, provider: string): Promise<ConnectionRow | null>;
+  listConnections(botId: string): Promise<ConnectionRow[]>;
+  updateConnection(row: ConnectionRow): Promise<void>;
+  setCapabilities(connectionId: string, capabilityIds: string[]): Promise<void>;
+  listCapabilities(connectionId: string): Promise<string[]>;
+  insertGrant(row: GrantRow): Promise<"ok" | "exists">;
+  listGrants(connectionId: string): Promise<GrantRow[]>;
+  deleteGrant(connectionId: string, grantId: string): Promise<void>;
+  insertAccessRequest(row: AccessRequestRow): Promise<void>;
+  findPendingAccessRequest(connectionId: string, externalId: string): Promise<AccessRequestRow | null>;
+  findAccessRequestByToken(token: string): Promise<AccessRequestRow | null>;
+  updateAccessRequest(row: AccessRequestRow): Promise<void>;
 
   insertLink(row: LinkRow): Promise<"ok" | "conflict">;
   findLinkById(id: string): Promise<LinkRow | null>;

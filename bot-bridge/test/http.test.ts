@@ -5,14 +5,46 @@ import { MemoryStore } from "../src/store/memory.js";
 
 const BASE = "http://bridge.test";
 
-function app() {
-  return createApp({ store: new MemoryStore(), baseUrl: BASE, auditToken: "audit-secret", sweepToken: "sweep-secret" });
+function app(extra: Partial<Parameters<typeof createApp>[0]> = {}) {
+  return createApp({
+    store: new MemoryStore(),
+    baseUrl: BASE,
+    auditToken: "audit-secret",
+    sweepToken: "sweep-secret",
+    sessionSecret: "test-session-secret",
+    oauth: { google: { clientId: "gid", clientSecret: "gsecret" } },
+    fetch: loginFetch,
+    ...extra,
+  });
 }
 
-async function register(server: ReturnType<typeof app>, name: string) {
+const loginFetch: typeof fetch = async (input, init) => {
+  const url = String(input);
+  const params = new URLSearchParams(typeof init?.body === "string" ? init.body : "");
+  const code = params.get("code") ?? "person";
+  if (url.includes("token")) return Response.json({ access_token: `token-${code}`, refresh_token: `refresh-${code}`, scope: "openid" });
+  if (url.includes("userinfo")) return Response.json({ sub: code, email: `${code}@example.com` });
+  return new Response("missing", { status: 404 });
+};
+
+async function signIn(server: ReturnType<typeof app>, code: string): Promise<string> {
+  const start = await server.request(`${BASE}/auth/google`);
+  const location = new URL(start.headers.get("location") ?? "", "https://accounts.google.com");
+  const state = location.searchParams.get("state") ?? "";
+  const oauthCookie = start.headers.getSetCookie().find((item) => item.startsWith("bb_oauth="))?.split(";")[0] ?? "";
+  const callback = await server.request(`${BASE}/auth/google/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, {
+    headers: { cookie: oauthCookie },
+  });
+  const session = callback.headers.getSetCookie().find((item) => item.startsWith("bb_session="))?.split(";")[0];
+  if (!session) throw new Error("missing session");
+  return session;
+}
+
+async function register(server: ReturnType<typeof app>, name: string, session?: string) {
+  const cookie = session ?? (await signIn(server, name));
   const response = await server.request(`${BASE}/register`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
+    headers: { "content-type": "application/json", accept: "application/json", cookie },
     body: JSON.stringify({ display_name: name }),
   });
   expect(response.status).toBe(201);
@@ -49,7 +81,11 @@ describe("http", () => {
     const health = await server.request(`${BASE}/health`);
     expect(await health.json()).toMatchObject({ ok: true, service: "bot-bridge", store: "memory" });
     const page = await server.request(`${BASE}/register`);
-    expect(await page.text()).toContain("Display name");
+    expect(page.status).toBe(303);
+    expect(page.headers.get("location")).toBe("/login");
+    const signedIn = await signIn(server, "owner");
+    const form = await server.request(`${BASE}/register`, { headers: { cookie: signedIn } });
+    expect(await form.text()).toContain("Display name");
     const missing = await rpc(server, "", "tools/list", {});
     expect(missing.status).toBe(401);
     const get = await server.request(`${BASE}/mcp`, { method: "GET" });
@@ -77,6 +113,7 @@ describe("http", () => {
       "check_messages",
       "clear_webhook",
       "get_webhook",
+      "list_access",
       "list_inbox",
       "list_links",
       "mark_read",
@@ -169,12 +206,9 @@ describe("http", () => {
 
   test("audit endpoint hides bodies and sweep deletes expired mail", async () => {
     let now = new Date("2026-01-01T00:00:00.000Z");
-    const server = createApp({
+    const server = app({
       store: new MemoryStore(),
-      baseUrl: BASE,
       now: () => now,
-      auditToken: "audit-secret",
-      sweepToken: "sweep-secret",
       limits: {
         maxBodyBytes: 2048,
         perLinkPerHour: 30,
@@ -224,11 +258,13 @@ describe("http", () => {
 
   test("registration cap is shared across app instances and ignores a spoofed forwarding prefix", async () => {
     const store = new MemoryStore();
-    const first = createApp({ store, baseUrl: BASE, registerPerHour: 2 });
-    const second = createApp({ store, baseUrl: BASE, registerPerHour: 2 });
+    const first = app({ store, registerPerHour: 2 });
+    const second = app({ store, registerPerHour: 2 });
+    const cookie = await signIn(first, "cap");
     const headers = {
       "content-type": "application/json",
       accept: "application/json",
+      cookie,
       "x-forwarded-for": "1.2.3.4, 10.0.0.8",
       "x-real-ip": "203.0.113.10",
     };
