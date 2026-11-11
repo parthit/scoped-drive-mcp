@@ -46,8 +46,7 @@ the design notes.
 
 This repository also contains [Bot Bridge](bot-bridge/README.md), a separate TypeScript MCP server. The pairing
 Muse and Grok use on `scoped-drive-mcp.vercel.app` is the mailbox inside this Python app, approved at `/bridge`.
-With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can POST a wake-up (ids only, no message text)
-to a Grok Bot webhook routine. The separate TypeScript server is a different deployment and a different mailbox.
+With `WEBHOOKS_ENABLED=1` and `WEBHOOK_KEK` set, that mailbox can also POST a wake-up, but Grok cannot read its own routine URL or key. The normal setup is a scheduled `check_messages` routine the bot creates after the human confirms one card. The prompt is `watch_mailbox`.
 
 ## Tools and roles
 
