@@ -1,17 +1,25 @@
+import { currentScheduler, type Scheduler } from "./background.js";
 import { HANDLING, presentUntrusted, previewUntrusted } from "./content.js";
 import { decodeCursor, encodeCursor, inviteCode, isTokenShape, newId, randomToken, sha256 } from "./ids.js";
-import { HOUR, type Limits, limitsFromEnv } from "./limits.js";
+import { HOUR, webhookFeatureFromEnv, type Limits, type WebhookFeature, limitsFromEnv } from "./limits.js";
+import { deliverWebhook, wakeFromMessage, type DeliveryResult, type WebhookTransport } from "./notify/webhook.js";
 import { err, ok, type Err, type Result } from "./result.js";
+import { decryptSecret, encryptSecret, secretHint } from "./secrets.js";
+import { approveWebhookUrl, defaultLookup, type DnsLookup } from "./ssrf.js";
 import type { Store } from "./store/types.js";
 import {
+  AUTH_SCHEMES,
   SCOPE,
   peerId,
   sideOf,
   type ApprovalRow,
+  type AuthScheme,
   type BotRow,
+  type DeliveryRow,
   type LinkRow,
   type LinkStatus,
   type MessageRow,
+  type NotifierRow,
   type Side,
 } from "./types.js";
 
@@ -69,14 +77,51 @@ export type ManageView =
       peer_name: string | null;
     };
 
+export type PublicDelivery = {
+  status: string;
+  attempts: number;
+  last_status_code: number | null;
+  last_error: string | null;
+  at: string;
+};
+
+export type PublicWebhook = {
+  configured: boolean;
+  enabled: boolean;
+  url: string | null;
+  auth_scheme: AuthScheme | null;
+  secret_hint: string | null;
+  settings_url: string;
+  last_error: string | null;
+  last_delivery: PublicDelivery | null;
+};
+
+export type SettingsView =
+  | { state: "invalid" }
+  | { state: "disabled" }
+  | ({ state: "ok"; display_name: string } & PublicWebhook);
+
 type BridgeOptions = {
   now?: () => Date;
   limits?: Limits;
+  webhooks?: WebhookFeature;
+  schedule?: Scheduler;
+  lookup?: DnsLookup;
+  postWebhook?: WebhookTransport;
+  jitter?: () => number;
 };
+
+const LEASE_MS = 5 * 60 * 1000;
+const BACKOFF_MS = [30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000];
 
 export class Bridge {
   private readonly now: () => Date;
   private readonly limits: Limits;
+  private readonly webhooks: WebhookFeature;
+  private readonly schedule: Scheduler;
+  private readonly lookup: DnsLookup;
+  private readonly postWebhook: WebhookTransport | undefined;
+  private readonly jitter: () => number;
 
   constructor(
     private readonly store: Store,
@@ -84,6 +129,11 @@ export class Bridge {
   ) {
     this.now = options.now ?? (() => new Date());
     this.limits = options.limits ?? limitsFromEnv();
+    this.webhooks = options.webhooks ?? webhookFeatureFromEnv();
+    this.schedule = options.schedule ?? currentScheduler();
+    this.lookup = options.lookup ?? defaultLookup;
+    this.postWebhook = options.postWebhook;
+    this.jitter = options.jitter ?? (() => Math.random() * 0.4 - 0.2);
   }
 
   async authenticate(token: string): Promise<BotRow | null> {
@@ -333,6 +383,7 @@ export class Bridge {
       let deleted = 0;
       if (input.purge) deleted = await tx.deleteMessagesForLink(link.link_id);
       if (!already) await tx.revoke(link.link_id, this.now(), actor);
+      if (!input.purge) await tx.cancelPendingForLink(link.link_id, "link_revoked");
       if (!already || input.purge) {
         await this.audit(tx, actor, "revoke_link", link.link_id, { purge: input.purge, deleted_messages: deleted, already_revoked: already });
       }
@@ -373,6 +424,7 @@ export class Bridge {
         const consumed = await tx.consumeApproval(current.approval_id, this.now());
         if (!consumed) return err("already_used", "This approval link was already used.", { link_id: link.link_id });
         await tx.revoke(link.link_id, this.now(), actor);
+        await tx.cancelPendingForLink(link.link_id, "link_revoked");
         await this.audit(tx, actor, "deny_link", link.link_id, { side: current.side });
         const manage = await this.manageUrl(tx, link, current.side, baseUrl);
         return ok({ status: "revoked" as const, link_id: link.link_id, manage_url: manage });
@@ -507,7 +559,8 @@ export class Bridge {
     if (input.threadId && !isTokenShape(input.threadId)) {
       return err("invalid_input", "thread_id must be 1–80 letters, numbers, underscores, or hyphens.");
     }
-    return this.store.transaction(async (tx) => {
+    let wakeId: string | null = null;
+    const result = await this.store.transaction(async (tx) => {
       await tx.lockBot(bot.bot_id);
       const link = await tx.lockLink(input.linkId);
       if (!link || !sideOf(link, bot.bot_id)) return err("not_found", "No matching link for this bot.");
@@ -560,8 +613,11 @@ export class Bridge {
         thread_id: message.thread_id,
         bytes: Buffer.byteLength(input.body, "utf8"),
       });
+      wakeId = await this.enqueueWake(tx, message);
       return ok(this.sent(message, false));
     });
+    if (result.ok && wakeId) this.fireWake(wakeId);
+    return result;
   }
 
   private sent(message: MessageRow, replay: boolean) {
@@ -757,6 +813,382 @@ export class Bridge {
     if (deleted > 0) await this.audit(tx, "system", "expire_messages", null, { deleted });
   }
 
+  async getWebhook(bot: BotRow, baseUrl: string, refresh = false): Promise<Result<PublicWebhook>> {
+    if (!this.webhookReady()) return this.webhookDisabled();
+    return this.store.transaction(async (tx) => ok(await this.presentWebhook(tx, bot, baseUrl, refresh)));
+  }
+
+  async setWebhook(
+    bot: BotRow,
+    baseUrl: string,
+    input: { url?: string; senderKey?: string; authScheme?: string; enabled?: boolean },
+  ): Promise<Result<PublicWebhook>> {
+    if (!this.webhookReady()) return this.webhookDisabled();
+    const scheme = input.authScheme ?? "bearer";
+    if (!isAuthScheme(scheme)) return err("invalid_input", "auth_scheme must be bearer, bearer_and_x_automation_key, hmac_sha256, or bearer_and_hmac.");
+    const existing = await this.store.findNotifier(bot.bot_id, "webhook");
+    const url = input.url?.trim() || existing?.url || "";
+    if (!url) return err("invalid_webhook_url", "A webhook URL is required.");
+    const approved = await approveWebhookUrl(url, this.webhooks.allowlist, this.lookup);
+    if (!approved.ok) {
+      if (approved.code === "dns") return err("invalid_webhook_url", "That webhook host did not resolve to a public address.");
+      if (approved.code === "webhook_host_not_allowed") {
+        return err("webhook_host_not_allowed", "That webhook host is not on the allowlist.", { host: safeHost(url) });
+      }
+      return err("invalid_webhook_url", "Webhook URLs must be https on an allowlisted host, with no user, password, query, or fragment.");
+    }
+    const senderKey = input.senderKey?.trim() ?? "";
+    let ciphertext = existing?.secret_ciphertext ?? null;
+    let nonce = existing?.secret_nonce ?? null;
+    let hint = existing?.secret_hint ?? null;
+    if (senderKey) {
+      const sealed = encryptSecret(senderKey, this.webhooks.kek!);
+      ciphertext = sealed.ciphertext;
+      nonce = sealed.nonce;
+      hint = secretHint(senderKey);
+    }
+    if (!ciphertext || !nonce) return err("secret_required", "A sender key is required the first time you save a webhook.");
+    const now = this.now();
+    const saved = await this.store.transaction(async (tx) => {
+      const row = await tx.upsertNotifier({
+        notifier_id: newId("ntf"),
+        bot_id: bot.bot_id,
+        kind: "webhook",
+        enabled: input.enabled ?? existing?.enabled ?? true,
+        url,
+        auth_scheme: scheme,
+        secret_ciphertext: ciphertext,
+        secret_nonce: nonce,
+        secret_hint: hint,
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+        consecutive_auth_failures: 0,
+        last_error: null,
+      });
+      await this.audit(tx, bot.bot_id, "set_webhook", null, { host: approved.hostname, scheme, enabled: row.enabled });
+      return this.presentWebhook(tx, bot, baseUrl, false);
+    });
+    return ok(saved);
+  }
+
+  async clearWebhook(bot: BotRow, baseUrl: string): Promise<Result<{ cleared: boolean } & PublicWebhook>> {
+    if (!this.webhookReady()) return this.webhookDisabled();
+    return this.store.transaction(async (tx) => {
+      const cleared = await tx.deleteNotifier(bot.bot_id, "webhook");
+      if (cleared) await this.audit(tx, bot.bot_id, "clear_webhook", null, { cleared: true });
+      const webhook = await this.presentWebhook(tx, bot, baseUrl, false);
+      return ok({ cleared, ...webhook });
+    });
+  }
+
+  async settingsView(token: string, baseUrl: string): Promise<SettingsView> {
+    if (!this.webhookReady()) return { state: "disabled" };
+    const settings = await this.store.findSettingsTokenByToken(token);
+    if (!settings) return { state: "invalid" };
+    const bot = await this.store.findBotById(settings.bot_id);
+    if (!bot) return { state: "invalid" };
+    const webhook = await this.store.transaction(async (tx) => this.presentWebhook(tx, bot, baseUrl, false));
+    return { state: "ok", display_name: bot.display_name, ...webhook };
+  }
+
+  async saveSettings(
+    token: string,
+    baseUrl: string,
+    input: { url?: string; senderKey?: string; authScheme?: string; enabled?: boolean },
+  ): Promise<Result<SettingsView>> {
+    const settings = await this.store.findSettingsTokenByToken(token);
+    if (!settings) return err("not_found", "This settings link is not valid.");
+    const bot = await this.store.findBotById(settings.bot_id);
+    if (!bot) return err("not_found", "This settings link is not valid.");
+    const saved = await this.setWebhook(bot, baseUrl, input);
+    if (!saved.ok) return saved;
+    return ok({ state: "ok", display_name: bot.display_name, ...saved.data });
+  }
+
+  async removeSettings(token: string, baseUrl: string): Promise<Result<SettingsView>> {
+    const settings = await this.store.findSettingsTokenByToken(token);
+    if (!settings) return err("not_found", "This settings link is not valid.");
+    const bot = await this.store.findBotById(settings.bot_id);
+    if (!bot) return err("not_found", "This settings link is not valid.");
+    const cleared = await this.clearWebhook(bot, baseUrl);
+    if (!cleared.ok) return cleared;
+    return ok({ state: "ok", display_name: bot.display_name, ...cleared.data });
+  }
+
+  async rotateSettings(token: string, baseUrl: string): Promise<Result<{ settings_url: string }>> {
+    if (!this.webhookReady()) return this.webhookDisabled();
+    const settings = await this.store.findSettingsTokenByToken(token);
+    if (!settings) return err("not_found", "This settings link is not valid.");
+    const rotated = await this.store.rotateSettingsToken(settings.bot_id, randomToken("st_", 24), this.now());
+    if (!rotated) return err("not_found", "This settings link is not valid.");
+    return ok({ settings_url: `${trimBase(baseUrl)}/settings/${rotated.token}` });
+  }
+
+  async drain(limit = 4): Promise<{ attempted: number; succeeded: number }> {
+    let attempted = 0;
+    let succeeded = 0;
+    const started = Date.now();
+    const budget = Math.min(limit, 4);
+    while (attempted < budget && Date.now() - started < 20_000) {
+      const claimed = await this.store.transaction(async (tx) => this.claimOne(tx));
+      if (!claimed) break;
+      attempted += 1;
+      const result = await this.performDelivery(claimed);
+      if (result.ok) succeeded += 1;
+    }
+    return { attempted, succeeded };
+  }
+
+  private webhookReady(): boolean {
+    return this.webhooks.enabled && this.webhooks.kek != null;
+  }
+
+  private webhookDisabled(): Err {
+    return err("webhook_disabled", "Webhook wake-ups are turned off on this server.");
+  }
+
+  private async presentWebhook(tx: Store, bot: BotRow, baseUrl: string, refresh: boolean): Promise<PublicWebhook> {
+    const token = await this.ensureSettingsToken(tx, bot.bot_id, refresh);
+    const notifier = await tx.findNotifier(bot.bot_id, "webhook");
+    const latest = await tx.latestDelivery(bot.bot_id);
+    return {
+      configured: notifier != null,
+      enabled: notifier?.enabled ?? false,
+      url: notifier?.url ?? null,
+      auth_scheme: notifier?.auth_scheme ?? null,
+      secret_hint: notifier?.secret_hint ?? null,
+      settings_url: `${trimBase(baseUrl)}/settings/${token.token}`,
+      last_error: notifier?.last_error ?? null,
+      last_delivery: latest ? presentDelivery(latest) : null,
+    };
+  }
+
+  private async ensureSettingsToken(tx: Store, botId: string, refresh: boolean) {
+    const existing = await tx.findSettingsTokenByBot(botId);
+    if (existing && !refresh) return existing;
+    if (existing && refresh) {
+      const rotated = await tx.rotateSettingsToken(botId, randomToken("st_", 24), this.now());
+      if (rotated) return rotated;
+    }
+    const created = { bot_id: botId, token: randomToken("st_", 24), created_at: this.now() };
+    const inserted = await tx.insertSettingsToken(created);
+    if (inserted === "ok") return created;
+    const again = await tx.findSettingsTokenByBot(botId);
+    if (again) return again;
+    throw new Error("could not issue settings token");
+  }
+
+  private async enqueueWake(tx: Store, message: MessageRow): Promise<string | null> {
+    if (!this.webhookReady()) return null;
+    const notifier = await tx.findNotifier(message.to_bot, "webhook");
+    if (!notifier?.enabled || !notifier.url || !notifier.secret_ciphertext) return null;
+    const delivery: DeliveryRow = {
+      delivery_id: newId("dlv"),
+      msg_id: message.msg_id,
+      notifier_id: notifier.notifier_id,
+      to_bot: message.to_bot,
+      status: "pending",
+      attempts: 0,
+      next_attempt_at: message.created_at,
+      last_status_code: null,
+      last_error: null,
+      delivered_at: null,
+      created_at: message.created_at,
+    };
+    const inserted = await tx.insertDelivery(delivery);
+    return inserted === "ok" ? delivery.delivery_id : null;
+  }
+
+  private fireWake(deliveryId: string): void {
+    try {
+      this.schedule(() => this.attemptDelivery(deliveryId));
+    } catch (error) {
+      console.error("webhook_schedule_failed", error instanceof Error ? error.name : "error");
+    }
+  }
+
+  private async attemptDelivery(deliveryId: string): Promise<void> {
+    try {
+      const claimed = await this.store.transaction(async (tx) => this.claimOne(tx, deliveryId));
+      if (!claimed) return;
+      await this.performDelivery(claimed);
+    } catch (error) {
+      console.error("webhook_delivery_failed", error instanceof Error ? error.name : "error");
+    }
+  }
+
+  private async claimOne(tx: Store, deliveryId?: string): Promise<DeliveryRow | null> {
+    const now = this.now();
+    const leaseUntil = new Date(now.getTime() + LEASE_MS);
+    for (let skipped = 0; skipped < 4; skipped++) {
+      const row = deliveryId ? await tx.findDelivery(deliveryId) : await tx.peekNextDue(now);
+      if (!row || row.status !== "pending" || row.next_attempt_at > now) return null;
+      const sends = await tx.countWebhookSendsSince(row.to_bot, new Date(now.getTime() - HOUR), row.delivery_id);
+      if (sends >= this.webhooks.maxPerBotPerHour) {
+        await tx.deferDelivery(row.delivery_id, new Date(now.getTime() + HOUR));
+        if (deliveryId) return null;
+        continue;
+      }
+      return tx.claimDelivery(row.delivery_id, now, leaseUntil);
+    }
+    return null;
+  }
+
+  private async performDelivery(claimed: DeliveryRow): Promise<DeliveryResult> {
+    const prepared = await this.prepareDelivery(claimed);
+    if (!prepared.ok) {
+      const result: DeliveryResult = { ok: false, retryable: prepared.retryable, errorCode: prepared.errorCode };
+      await this.store.transaction(async (tx) => {
+        const finished = this.finishFromResult(claimed, result);
+        await tx.finishDelivery(finished);
+        if (prepared.audit) {
+          await this.audit(tx, claimed.to_bot, "webhook_delivery_failed", prepared.linkId, prepared.audit);
+        }
+      });
+      console.error("webhook_delivery_failed", prepared.errorCode);
+      return result;
+    }
+    const result = await deliverWebhook({
+      hostname: prepared.hostname,
+      path: prepared.path,
+      address: prepared.address,
+      secret: prepared.secret,
+      scheme: prepared.scheme,
+      event: prepared.event,
+      timeoutMs: this.webhooks.attemptTimeoutMs,
+      now: this.now(),
+      post: this.postWebhook,
+    });
+    await this.store.transaction(async (tx) => {
+      const notifier = await tx.findNotifier(claimed.to_bot, "webhook");
+      const finished = this.finishFromResult(claimed, result);
+      await tx.finishDelivery(finished);
+      if (notifier) await this.applyNotifierHealth(tx, notifier, result);
+      if (!result.ok) {
+        await this.audit(tx, claimed.to_bot, "webhook_delivery_failed", prepared.linkId, {
+          msg_id: claimed.msg_id,
+          attempts: finished.attempts,
+          status_code: result.statusCode ?? null,
+          error: finished.last_error,
+        });
+        console.error("webhook_delivery_failed", finished.last_error ?? "http_status");
+      }
+    });
+    return result;
+  }
+
+  private finishFromResult(claimed: DeliveryRow, result: DeliveryResult): DeliveryRow {
+    const authFailure = result.statusCode === 401 || result.statusCode === 403;
+    const gaveUp = !result.ok && (authFailure || !result.retryable || claimed.attempts >= this.webhooks.maxAttempts);
+    if (result.ok) {
+      return {
+        ...claimed,
+        status: "succeeded",
+        last_status_code: result.statusCode ?? 200,
+        last_error: null,
+        delivered_at: this.now(),
+      };
+    }
+    if (gaveUp) {
+      return {
+        ...claimed,
+        status: "dead",
+        last_status_code: result.statusCode ?? null,
+        last_error: claimed.attempts >= this.webhooks.maxAttempts && result.retryable ? "gave_up" : result.errorCode,
+      };
+    }
+    const base = BACKOFF_MS[Math.min(claimed.attempts, BACKOFF_MS.length) - 1] ?? BACKOFF_MS[BACKOFF_MS.length - 1]!;
+    const delay = Math.max(1_000, Math.round(base * (1 + this.jitter())));
+    return {
+      ...claimed,
+      status: "pending",
+      last_status_code: result.statusCode ?? null,
+      last_error: result.errorCode,
+      next_attempt_at: new Date(this.now().getTime() + delay),
+    };
+  }
+
+  private async applyNotifierHealth(tx: Store, notifier: NotifierRow, result: DeliveryResult): Promise<void> {
+    const authFailure = result.statusCode === 401 || result.statusCode === 403;
+    if (result.ok) {
+      await tx.setNotifierHealth(notifier.notifier_id, { enabled: notifier.enabled, consecutiveAuthFailures: 0, lastError: null });
+      return;
+    }
+    if (!authFailure) return;
+    const failures = notifier.consecutive_auth_failures + 1;
+    const disable = failures >= 3;
+    await tx.setNotifierHealth(notifier.notifier_id, {
+      enabled: disable ? false : notifier.enabled,
+      consecutiveAuthFailures: failures,
+      lastError: disable ? "auth_rejected" : notifier.last_error,
+    });
+    if (disable) await tx.cancelPendingForBot(notifier.bot_id, "auth_rejected");
+  }
+
+  private async prepareDelivery(claimed: DeliveryRow): Promise<
+    | {
+        ok: true;
+        hostname: string;
+        path: string;
+        address: string;
+        secret: string;
+        scheme: AuthScheme;
+        event: ReturnType<typeof wakeFromMessage>;
+        linkId: string;
+      }
+    | { ok: false; errorCode: string; retryable: boolean; linkId: string | null; audit: Record<string, unknown> | null }
+  > {
+    const message = await this.store.findMessageById(claimed.msg_id);
+    const notifier = await this.store.findNotifier(claimed.to_bot, "webhook");
+    if (!message) return { ok: false, errorCode: "message_gone", retryable: false, linkId: null, audit: null };
+    const link = await this.store.findLinkById(message.link_id);
+    if (!link || link.status !== "active") {
+      return {
+        ok: false,
+        errorCode: "link_revoked",
+        retryable: false,
+        linkId: message.link_id,
+        audit: { msg_id: claimed.msg_id, error: "link_revoked" },
+      };
+    }
+    if (!notifier?.enabled || !notifier.url || !notifier.secret_ciphertext || !notifier.secret_nonce || !this.webhooks.kek) {
+      return { ok: false, errorCode: "notifier_removed", retryable: false, linkId: message.link_id, audit: null };
+    }
+    let secret: string;
+    try {
+      secret = decryptSecret(notifier.secret_ciphertext, notifier.secret_nonce, this.webhooks.kek);
+    } catch {
+      return {
+        ok: false,
+        errorCode: "decrypt_failed",
+        retryable: false,
+        linkId: message.link_id,
+        audit: { msg_id: claimed.msg_id, error: "decrypt_failed" },
+      };
+    }
+    const approved = await approveWebhookUrl(notifier.url, this.webhooks.allowlist, this.lookup);
+    if (!approved.ok) {
+      const dns = approved.code === "dns";
+      return {
+        ok: false,
+        errorCode: dns ? "dns" : "ssrf_blocked",
+        retryable: dns,
+        linkId: message.link_id,
+        audit: { msg_id: claimed.msg_id, error: dns ? "dns" : "ssrf_blocked" },
+      };
+    }
+    return {
+      ok: true,
+      hostname: approved.hostname,
+      path: approved.path,
+      address: approved.address,
+      secret,
+      scheme: notifier.auth_scheme,
+      event: wakeFromMessage(message),
+      linkId: message.link_id,
+    };
+  }
+
   private async audit(tx: Store, actor: string, action: string, linkId: string | null, meta: Record<string, unknown>): Promise<void> {
     if ("body" in meta || "message_body" in meta) throw new Error("refusing to audit message body");
     await tx.insertAudit({
@@ -813,4 +1245,26 @@ function cleanEmail(email: string | null | undefined): string | null | { error: 
 
 function trimBase(baseUrl: string): string {
   return baseUrl.replace(/\/$/, "");
+}
+
+function isAuthScheme(value: string): value is AuthScheme {
+  return (AUTH_SCHEMES as readonly string[]).includes(value);
+}
+
+function presentDelivery(row: DeliveryRow): PublicDelivery {
+  return {
+    status: row.status,
+    attempts: row.attempts,
+    last_status_code: row.last_status_code,
+    last_error: row.last_error,
+    at: (row.delivered_at ?? row.created_at).toISOString(),
+  };
+}
+
+function safeHost(raw: string): string | null {
+  try {
+    return new URL(raw).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }

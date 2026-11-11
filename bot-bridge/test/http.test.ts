@@ -75,6 +75,8 @@ describe("http", () => {
     const names = (tools.body.result?.tools ?? []).map((tool) => tool.name).sort();
     expect(names).toEqual([
       "check_messages",
+      "clear_webhook",
+      "get_webhook",
       "list_inbox",
       "list_links",
       "mark_read",
@@ -82,6 +84,7 @@ describe("http", () => {
       "request_link",
       "revoke_link",
       "send_message",
+      "set_webhook",
       "whoami",
     ]);
 

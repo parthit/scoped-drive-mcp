@@ -94,6 +94,52 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS audit_actor_idx
   ON audit_events (actor, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS bot_settings_tokens (
+  bot_id TEXT PRIMARY KEY REFERENCES bots (bot_id),
+  token TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifiers (
+  notifier_id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL REFERENCES bots (bot_id),
+  kind TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL,
+  url TEXT,
+  auth_scheme TEXT NOT NULL,
+  secret_ciphertext TEXT,
+  secret_nonce TEXT,
+  secret_hint TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  consecutive_auth_failures INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  CONSTRAINT notifiers_kind_check CHECK (kind IN ('webhook')),
+  CONSTRAINT notifiers_scheme_check CHECK (
+    auth_scheme IN ('bearer', 'bearer_and_x_automation_key', 'hmac_sha256', 'bearer_and_hmac')
+  ),
+  CONSTRAINT notifiers_bot_kind_unique UNIQUE (bot_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS notifier_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  msg_id TEXT NOT NULL UNIQUE REFERENCES messages (msg_id) ON DELETE CASCADE,
+  notifier_id TEXT NOT NULL REFERENCES notifiers (notifier_id) ON DELETE CASCADE,
+  to_bot TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  next_attempt_at TIMESTAMPTZ NOT NULL,
+  last_status_code INTEGER,
+  last_error TEXT,
+  delivered_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT notifier_deliveries_status_check CHECK (status IN ('pending', 'succeeded', 'dead'))
+);
+
+CREATE INDEX IF NOT EXISTS notifier_deliveries_due_idx
+  ON notifier_deliveries (next_attempt_at)
+  WHERE status = 'pending';
+
 CREATE TABLE IF NOT EXISTS rate_locks (
   actor TEXT PRIMARY KEY,
   window_start TIMESTAMPTZ NOT NULL,

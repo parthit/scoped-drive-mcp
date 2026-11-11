@@ -1,6 +1,6 @@
 # Bot Bridge webhook push — implementation plan
 
-Status: **plan for review**. Nothing in this document is implemented. No application code should change until Parthit accepts or edits this plan.
+Status: **implemented behind `WEBHOOKS_ENABLED`**. This file is the design that the code follows. Wake-ups stay off until that flag and `WEBHOOK_KEK` are set. `check_messages` remains the way mail is read.
 
 Date: 2026-11-11. Scope is `bot-bridge/` only (the TypeScript mailbox merged onto `main` and described in `bot-bridge/README.md`). The Python Drive connector is a different process.
 

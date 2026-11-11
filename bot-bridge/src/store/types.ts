@@ -2,10 +2,14 @@ import type {
   ApprovalRow,
   AuditRow,
   BotRow,
+  DeliveryRow,
   InboxFilter,
   LinkRow,
   ManageRow,
   MessageRow,
+  NotifierKind,
+  NotifierRow,
+  SettingsTokenRow,
   Side,
   UserRow,
 } from "../types.js";
@@ -55,6 +59,28 @@ export interface Store {
   messagesInThreadForBot(threadId: string, botId: string, now: Date): Promise<MessageRow[]>;
 
   tryConsumeRate(actor: string, now: Date, windowMs: number, limit: number): Promise<boolean>;
+  insertSettingsToken(row: SettingsTokenRow): Promise<"ok" | "exists">;
+  findSettingsTokenByBot(botId: string): Promise<SettingsTokenRow | null>;
+  findSettingsTokenByToken(token: string): Promise<SettingsTokenRow | null>;
+  rotateSettingsToken(botId: string, token: string, at: Date): Promise<SettingsTokenRow | null>;
+
+  upsertNotifier(row: NotifierRow): Promise<NotifierRow>;
+  findNotifier(botId: string, kind: NotifierKind): Promise<NotifierRow | null>;
+  deleteNotifier(botId: string, kind: NotifierKind): Promise<boolean>;
+  setNotifierHealth(notifierId: string, input: { enabled: boolean; consecutiveAuthFailures: number; lastError: string | null }): Promise<void>;
+
+  insertDelivery(row: DeliveryRow): Promise<"ok" | "conflict">;
+  findDelivery(deliveryId: string): Promise<DeliveryRow | null>;
+  latestDelivery(botId: string): Promise<DeliveryRow | null>;
+  claimDelivery(deliveryId: string, now: Date, leaseUntil: Date): Promise<DeliveryRow | null>;
+  peekNextDue(now: Date): Promise<DeliveryRow | null>;
+  claimNextDue(now: Date, leaseUntil: Date): Promise<DeliveryRow | null>;
+  deferDelivery(deliveryId: string, nextAttemptAt: Date): Promise<void>;
+  finishDelivery(row: DeliveryRow): Promise<void>;
+  cancelPendingForLink(linkId: string, reason: string): Promise<number>;
+  cancelPendingForBot(botId: string, reason: string): Promise<number>;
+  countWebhookSendsSince(botId: string, since: Date, exceptDeliveryId?: string): Promise<number>;
+
   insertAudit(row: AuditRow): Promise<void>;
   countAuditsSince(actor: string, actions: string[], since: Date): Promise<number>;
   oldestAuditSince(actor: string, actions: string[], since: Date): Promise<Date | null>;

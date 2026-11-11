@@ -62,6 +62,49 @@ export type MessageRow = {
   expires_at: Date;
 };
 
+export const AUTH_SCHEMES = ["bearer", "bearer_and_x_automation_key", "hmac_sha256", "bearer_and_hmac"] as const;
+export type AuthScheme = (typeof AUTH_SCHEMES)[number];
+export const NOTIFIER_KINDS = ["webhook"] as const;
+export type NotifierKind = (typeof NOTIFIER_KINDS)[number];
+export const DELIVERY_STATUSES = ["pending", "succeeded", "dead"] as const;
+export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
+
+export type SettingsTokenRow = {
+  bot_id: string;
+  token: string;
+  created_at: Date;
+};
+
+export type NotifierRow = {
+  notifier_id: string;
+  bot_id: string;
+  kind: NotifierKind;
+  enabled: boolean;
+  url: string | null;
+  auth_scheme: AuthScheme;
+  secret_ciphertext: string | null;
+  secret_nonce: string | null;
+  secret_hint: string | null;
+  created_at: Date;
+  updated_at: Date;
+  consecutive_auth_failures: number;
+  last_error: string | null;
+};
+
+export type DeliveryRow = {
+  delivery_id: string;
+  msg_id: string;
+  notifier_id: string;
+  to_bot: string;
+  status: DeliveryStatus;
+  attempts: number;
+  next_attempt_at: Date;
+  last_status_code: number | null;
+  last_error: string | null;
+  delivered_at: Date | null;
+  created_at: Date;
+};
+
 export type AuditRow = {
   event_id: string;
   actor: string;

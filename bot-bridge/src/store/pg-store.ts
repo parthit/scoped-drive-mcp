@@ -1,5 +1,5 @@
 import { schemaStatements } from "../schema.js";
-import type { ApprovalRow, AuditRow, BotRow, InboxFilter, LinkRow, ManageRow, MessageRow, Side, UserRow } from "../types.js";
+import type { ApprovalRow, AuditRow, BotRow, DeliveryRow, InboxFilter, LinkRow, ManageRow, MessageRow, NotifierKind, NotifierRow, SettingsTokenRow, Side, UserRow } from "../types.js";
 import { asDate, asDateOrNull, asMeta } from "./coerce.js";
 import type { Db } from "./db.js";
 import type { Store } from "./types.js";
@@ -27,7 +27,7 @@ export class PgStore implements Store {
 
   async clearAll(): Promise<void> {
     await this.db.query(
-      "TRUNCATE TABLE audit_events, messages, manage_tokens, approvals, links, bots, users, rate_locks RESTART IDENTITY CASCADE",
+      "TRUNCATE TABLE notifier_deliveries, notifiers, bot_settings_tokens, audit_events, messages, manage_tokens, approvals, links, bots, users, rate_locks RESTART IDENTITY CASCADE",
     );
   }
 
@@ -366,6 +366,225 @@ export class PgStore implements Store {
     return rows.length > 0;
   }
 
+  async insertSettingsToken(row: SettingsTokenRow): Promise<"ok" | "exists"> {
+    const rows = await this.db.query(
+      `INSERT INTO bot_settings_tokens (bot_id, token, created_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (bot_id) DO NOTHING
+       RETURNING bot_id`,
+      [row.bot_id, row.token, row.created_at],
+    );
+    return rows.length > 0 ? "ok" : "exists";
+  }
+
+  async findSettingsTokenByBot(botId: string): Promise<SettingsTokenRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM bot_settings_tokens WHERE bot_id = $1", [botId]);
+    return rows[0] ? mapSettings(rows[0]) : null;
+  }
+
+  async findSettingsTokenByToken(token: string): Promise<SettingsTokenRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM bot_settings_tokens WHERE token = $1", [token]);
+    return rows[0] ? mapSettings(rows[0]) : null;
+  }
+
+  async rotateSettingsToken(botId: string, token: string, at: Date): Promise<SettingsTokenRow | null> {
+    const rows = await this.db.query<Raw>(
+      `UPDATE bot_settings_tokens SET token = $2, created_at = $3 WHERE bot_id = $1 RETURNING *`,
+      [botId, token, at],
+    );
+    return rows[0] ? mapSettings(rows[0]) : null;
+  }
+
+  async upsertNotifier(row: NotifierRow): Promise<NotifierRow> {
+    const rows = await this.db.query<Raw>(
+      `INSERT INTO notifiers (
+         notifier_id, bot_id, kind, enabled, url, auth_scheme, secret_ciphertext, secret_nonce, secret_hint,
+         created_at, updated_at, consecutive_auth_failures, last_error
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (bot_id, kind) DO UPDATE SET
+         enabled = EXCLUDED.enabled,
+         url = EXCLUDED.url,
+         auth_scheme = EXCLUDED.auth_scheme,
+         secret_ciphertext = EXCLUDED.secret_ciphertext,
+         secret_nonce = EXCLUDED.secret_nonce,
+         secret_hint = EXCLUDED.secret_hint,
+         updated_at = EXCLUDED.updated_at,
+         consecutive_auth_failures = 0,
+         last_error = NULL
+       RETURNING *`,
+      [
+        row.notifier_id,
+        row.bot_id,
+        row.kind,
+        row.enabled,
+        row.url,
+        row.auth_scheme,
+        row.secret_ciphertext,
+        row.secret_nonce,
+        row.secret_hint,
+        row.created_at,
+        row.updated_at,
+        row.consecutive_auth_failures,
+        row.last_error,
+      ],
+    );
+    return mapNotifier(rows[0]!);
+  }
+
+  async findNotifier(botId: string, kind: NotifierKind): Promise<NotifierRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM notifiers WHERE bot_id = $1 AND kind = $2", [botId, kind]);
+    return rows[0] ? mapNotifier(rows[0]) : null;
+  }
+
+  async deleteNotifier(botId: string, kind: NotifierKind): Promise<boolean> {
+    const rows = await this.db.query("DELETE FROM notifiers WHERE bot_id = $1 AND kind = $2 RETURNING notifier_id", [botId, kind]);
+    return rows.length > 0;
+  }
+
+  async setNotifierHealth(
+    notifierId: string,
+    input: { enabled: boolean; consecutiveAuthFailures: number; lastError: string | null },
+  ): Promise<void> {
+    await this.db.query(
+      `UPDATE notifiers SET enabled = $2, consecutive_auth_failures = $3, last_error = $4 WHERE notifier_id = $1`,
+      [notifierId, input.enabled, input.consecutiveAuthFailures, input.lastError],
+    );
+  }
+
+  async insertDelivery(row: DeliveryRow): Promise<"ok" | "conflict"> {
+    const rows = await this.db.query(
+      `INSERT INTO notifier_deliveries (
+         delivery_id, msg_id, notifier_id, to_bot, status, attempts, next_attempt_at, last_status_code, last_error, delivered_at, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (msg_id) DO NOTHING
+       RETURNING delivery_id`,
+      [
+        row.delivery_id,
+        row.msg_id,
+        row.notifier_id,
+        row.to_bot,
+        row.status,
+        row.attempts,
+        row.next_attempt_at,
+        row.last_status_code,
+        row.last_error,
+        row.delivered_at,
+        row.created_at,
+      ],
+    );
+    return rows.length > 0 ? "ok" : "conflict";
+  }
+
+  async findDelivery(deliveryId: string): Promise<DeliveryRow | null> {
+    const rows = await this.db.query<Raw>("SELECT * FROM notifier_deliveries WHERE delivery_id = $1", [deliveryId]);
+    return rows[0] ? mapDelivery(rows[0]) : null;
+  }
+
+  async latestDelivery(botId: string): Promise<DeliveryRow | null> {
+    const rows = await this.db.query<Raw>(
+      `SELECT * FROM notifier_deliveries WHERE to_bot = $1 ORDER BY created_at DESC, delivery_id DESC LIMIT 1`,
+      [botId],
+    );
+    return rows[0] ? mapDelivery(rows[0]) : null;
+  }
+
+  async peekNextDue(now: Date): Promise<DeliveryRow | null> {
+    const rows = await this.db.query<Raw>(
+      `SELECT * FROM notifier_deliveries
+       WHERE status = 'pending' AND next_attempt_at <= $1
+       ORDER BY next_attempt_at, delivery_id
+       LIMIT 1
+       FOR UPDATE SKIP LOCKED`,
+      [now],
+    );
+    return rows[0] ? mapDelivery(rows[0]) : null;
+  }
+
+  async claimDelivery(deliveryId: string, now: Date, leaseUntil: Date): Promise<DeliveryRow | null> {
+    const rows = await this.db.query<Raw>(
+      `UPDATE notifier_deliveries
+       SET attempts = attempts + 1, next_attempt_at = $3
+       WHERE delivery_id = $1 AND status = 'pending' AND next_attempt_at <= $2
+       RETURNING *`,
+      [deliveryId, now, leaseUntil],
+    );
+    return rows[0] ? mapDelivery(rows[0]) : null;
+  }
+
+  async claimNextDue(now: Date, leaseUntil: Date): Promise<DeliveryRow | null> {
+    const rows = await this.db.query<Raw>(
+      `WITH due AS (
+         SELECT delivery_id FROM notifier_deliveries
+         WHERE status = 'pending' AND next_attempt_at <= $1
+         ORDER BY next_attempt_at, delivery_id
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE notifier_deliveries AS d
+       SET attempts = d.attempts + 1, next_attempt_at = $2
+       FROM due
+       WHERE d.delivery_id = due.delivery_id
+       RETURNING d.*`,
+      [now, leaseUntil],
+    );
+    return rows[0] ? mapDelivery(rows[0]) : null;
+  }
+
+  async deferDelivery(deliveryId: string, nextAttemptAt: Date): Promise<void> {
+    await this.db.query(
+      `UPDATE notifier_deliveries SET next_attempt_at = $2 WHERE delivery_id = $1 AND status = 'pending'`,
+      [deliveryId, nextAttemptAt],
+    );
+  }
+
+  async finishDelivery(row: DeliveryRow): Promise<void> {
+    await this.db.query(
+      `UPDATE notifier_deliveries
+       SET status = $2, attempts = $3, next_attempt_at = $4, last_status_code = $5, last_error = $6, delivered_at = $7
+       WHERE delivery_id = $1`,
+      [row.delivery_id, row.status, row.attempts, row.next_attempt_at, row.last_status_code, row.last_error, row.delivered_at],
+    );
+  }
+
+  async cancelPendingForLink(linkId: string, reason: string): Promise<number> {
+    const rows = await this.db.query(
+      `UPDATE notifier_deliveries
+       SET status = 'dead', last_error = $2
+       WHERE status = 'pending' AND msg_id IN (SELECT msg_id FROM messages WHERE link_id = $1)
+       RETURNING delivery_id`,
+      [linkId, reason],
+    );
+    return rows.length;
+  }
+
+  async cancelPendingForBot(botId: string, reason: string): Promise<number> {
+    const rows = await this.db.query(
+      `UPDATE notifier_deliveries SET status = 'dead', last_error = $2
+       WHERE status = 'pending' AND to_bot = $1
+       RETURNING delivery_id`,
+      [botId, reason],
+    );
+    return rows.length;
+  }
+
+  async countWebhookSendsSince(botId: string, since: Date, exceptDeliveryId?: string): Promise<number> {
+    const params: unknown[] = [botId, since];
+    let exclude = "";
+    if (exceptDeliveryId) {
+      params.push(exceptDeliveryId);
+      exclude = ` AND delivery_id <> $${params.length}`;
+    }
+    const rows = await this.db.query<{ count: number | string }>(
+      `SELECT COUNT(*)::int AS count FROM notifier_deliveries
+       WHERE to_bot = $1 AND attempts > 0${exclude} AND (
+         (delivered_at IS NOT NULL AND delivered_at >= $2) OR
+         (delivered_at IS NULL AND created_at >= $2)
+       )`,
+      params,
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
   async insertAudit(row: AuditRow): Promise<void> {
     await this.db.query(
       `INSERT INTO audit_events (event_id, actor, action, link_id, meta_json, created_at)
@@ -495,6 +714,48 @@ function mapMessage(row: Raw): MessageRow {
     created_at: asDate(row.created_at),
     read_at: asDateOrNull(row.read_at),
     expires_at: asDate(row.expires_at),
+  };
+}
+
+function mapSettings(row: Raw): SettingsTokenRow {
+  return {
+    bot_id: String(row.bot_id),
+    token: String(row.token),
+    created_at: asDate(row.created_at),
+  };
+}
+
+function mapNotifier(row: Raw): NotifierRow {
+  return {
+    notifier_id: String(row.notifier_id),
+    bot_id: String(row.bot_id),
+    kind: "webhook",
+    enabled: row.enabled === true || row.enabled === "t" || row.enabled === "true",
+    url: row.url == null ? null : String(row.url),
+    auth_scheme: row.auth_scheme as NotifierRow["auth_scheme"],
+    secret_ciphertext: row.secret_ciphertext == null ? null : String(row.secret_ciphertext),
+    secret_nonce: row.secret_nonce == null ? null : String(row.secret_nonce),
+    secret_hint: row.secret_hint == null ? null : String(row.secret_hint),
+    created_at: asDate(row.created_at),
+    updated_at: asDate(row.updated_at),
+    consecutive_auth_failures: Number(row.consecutive_auth_failures ?? 0),
+    last_error: row.last_error == null ? null : String(row.last_error),
+  };
+}
+
+function mapDelivery(row: Raw): DeliveryRow {
+  return {
+    delivery_id: String(row.delivery_id),
+    msg_id: String(row.msg_id),
+    notifier_id: String(row.notifier_id),
+    to_bot: String(row.to_bot),
+    status: row.status as DeliveryRow["status"],
+    attempts: Number(row.attempts),
+    next_attempt_at: asDate(row.next_attempt_at),
+    last_status_code: row.last_status_code == null ? null : Number(row.last_status_code),
+    last_error: row.last_error == null ? null : String(row.last_error),
+    delivered_at: asDateOrNull(row.delivered_at),
+    created_at: asDate(row.created_at),
   };
 }
 
