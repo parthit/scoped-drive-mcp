@@ -202,7 +202,11 @@ export function createApp(deps: AppDeps): Hono {
     const token = c.req.param("token");
     const origin = base(c, deps.baseUrl);
     const body = await readObject(c);
-    const action = body.ok ? stringField(body.value, "action") ?? "save" : "save";
+    if (!body.ok) {
+      if (wantsJson(c)) return c.json({ error: "invalid_input", message: body.message }, 400);
+      return html(c, settingsPage(await bridge.settingsView(token, origin), body.message), 400);
+    }
+    const action = stringField(body.value, "action") ?? "save";
     if (action === "rotate") {
       const rotated = await bridge.rotateSettings(token, origin);
       if (!rotated.ok) {
@@ -221,13 +225,11 @@ export function createApp(deps: AppDeps): Hono {
       if (wantsJson(c)) return c.json(removed.data);
       return html(c, settingsPage(removed.data));
     }
-    const enabledRaw = body.ok ? body.value.enabled : undefined;
-    const enabled = enabledRaw === true || enabledRaw === "true" || enabledRaw === "on" || enabledRaw === "yes";
     const saved = await bridge.saveSettings(token, origin, {
-      url: body.ok ? stringField(body.value, "url") : undefined,
-      senderKey: body.ok ? stringField(body.value, "sender_key") : undefined,
-      authScheme: body.ok ? stringField(body.value, "auth_scheme") : undefined,
-      enabled,
+      url: stringField(body.value, "url"),
+      senderKey: stringField(body.value, "sender_key"),
+      authScheme: stringField(body.value, "auth_scheme"),
+      enabled: enabledField(body.value.enabled),
     });
     if (!saved.ok) {
       if (wantsJson(c)) return c.json({ error: saved.error, message: saved.message, ...saved.details }, statusFor(saved.error));
@@ -377,6 +379,11 @@ async function readObject(c: { req: { header: (name: string) => string | undefin
 function stringField(body: Record<string, unknown>, key: string): string | undefined {
   const value = body[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function enabledField(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === true || value === "true" || value === "on" || value === "yes";
 }
 
 function tokenFromHeader(authorization: string | undefined, alt: string | undefined): string | null {

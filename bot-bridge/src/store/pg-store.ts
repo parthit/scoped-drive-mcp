@@ -578,7 +578,7 @@ export class PgStore implements Store {
       `SELECT COUNT(*)::int AS count FROM notifier_deliveries
        WHERE to_bot = $1 AND attempts > 0${exclude} AND (
          (delivered_at IS NOT NULL AND delivered_at >= $2) OR
-         (delivered_at IS NULL AND created_at >= $2)
+         (delivered_at IS NULL AND next_attempt_at >= $2)
        )`,
       params,
     );

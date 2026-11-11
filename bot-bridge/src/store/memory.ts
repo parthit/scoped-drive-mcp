@@ -498,7 +498,7 @@ export class MemoryStore implements Store {
       if (delivery.to_bot !== botId || delivery.attempts < 1) continue;
       if (delivery.delivered_at) {
         if (delivery.delivered_at >= since) count += 1;
-      } else if (delivery.created_at >= since) {
+      } else if (delivery.next_attempt_at >= since) {
         count += 1;
       }
     }

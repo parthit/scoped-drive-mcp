@@ -118,7 +118,7 @@ export class Bridge {
   private readonly now: () => Date;
   private readonly limits: Limits;
   private readonly webhooks: WebhookFeature;
-  private readonly schedule: Scheduler;
+  private readonly scheduleOverride: Scheduler | undefined;
   private readonly lookup: DnsLookup;
   private readonly postWebhook: WebhookTransport | undefined;
   private readonly jitter: () => number;
@@ -130,7 +130,7 @@ export class Bridge {
     this.now = options.now ?? (() => new Date());
     this.limits = options.limits ?? limitsFromEnv();
     this.webhooks = options.webhooks ?? webhookFeatureFromEnv();
-    this.schedule = options.schedule ?? currentScheduler();
+    this.scheduleOverride = options.schedule;
     this.lookup = options.lookup ?? defaultLookup;
     this.postWebhook = options.postWebhook;
     this.jitter = options.jitter ?? (() => Math.random() * 0.4 - 0.2);
@@ -1000,8 +1000,9 @@ export class Bridge {
   }
 
   private fireWake(deliveryId: string): void {
+    const schedule = this.scheduleOverride ?? currentScheduler();
     try {
-      this.schedule(() => this.attemptDelivery(deliveryId));
+      schedule(() => this.attemptDelivery(deliveryId));
     } catch (error) {
       console.error("webhook_schedule_failed", error instanceof Error ? error.name : "error");
     }

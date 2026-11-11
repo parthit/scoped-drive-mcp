@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { runWithScheduler } from "../src/background.js";
 import { createApp } from "../src/app.js";
 import { Bridge } from "../src/bridge.js";
 import type { WebhookFeature } from "../src/limits.js";
@@ -279,6 +280,41 @@ function registerWebhookTests(label: string, openStore: () => Promise<Store>): v
       expect(blob).not.toContain(SECRET);
     });
 
+    test("the request scheduler is read when the message is sent", async () => {
+      const app = new Bridge(store, {
+        now: () => now,
+        webhooks: feature,
+        lookup: async () => ["8.8.8.8"],
+        postWebhook: (input) => postImpl(input),
+        jitter: () => 0,
+      });
+      const { alex, blair, invite } = await active(app);
+      must(await app.setWebhook(blair, BASE, { url: URL, senderKey: SECRET }));
+      const started: Array<Promise<void>> = [];
+      await runWithScheduler((work) => {
+        started.push(work());
+      }, () => app.sendMessage(alex, { linkId: invite.link_id, body: "wake now" }));
+      await Promise.all(started);
+      expect(posts).toHaveLength(1);
+    });
+
+    test("a retry from an older message counts toward this hour", async () => {
+      const app = bridge({ maxPerBotPerHour: 1 });
+      const { alex, blair, invite } = await active(app);
+      must(await app.setWebhook(blair, BASE, { url: URL, senderKey: SECRET }));
+      statusCode = 500;
+      await app.sendMessage(alex, { linkId: invite.link_id, body: "old" });
+      await flush();
+      advance(90 * 60 * 1000);
+      expect((await app.drain()).attempted).toBe(1);
+      const before = posts.length;
+      advance(1000);
+      await app.sendMessage(alex, { linkId: invite.link_id, body: "new" });
+      await flush();
+      expect(posts).toHaveLength(before);
+      expect(must(await app.getWebhook(blair, BASE)).last_delivery?.attempts).toBe(0);
+    });
+
     test("two drains send one ping", async () => {
       const app = bridge();
       const { alex, blair, invite } = await active(app);
@@ -356,6 +392,20 @@ describe("webhook http", () => {
     });
     expect(removed.status).toBe(200);
     expect(must(await app.getWebhook(blair, BASE)).configured).toBe(false);
+
+    const again = await http.request(settings.settings_url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ action: "save", url: URL, sender_key: SECRET }),
+    });
+    expect(again.status).toBe(200);
+    const kept = await http.request(settings.settings_url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ action: "save", url: URL }),
+    });
+    expect(kept.status).toBe(200);
+    expect(must(await app.getWebhook(blair, BASE)).enabled).toBe(true);
   });
 
   test("rotating the settings link kills the old url", async () => {
