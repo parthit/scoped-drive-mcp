@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Bridge } from "./bridge.js";
 import { INSTRUCTIONS, PLAYBOOK } from "./playbook.js";
 import type { Err } from "./result.js";
-import { LINK_STATUSES, type BotRow } from "./types.js";
+import { AUTH_SCHEMES, LINK_STATUSES, type BotRow } from "./types.js";
 
 const VERSION = "1.0.0";
 
@@ -160,6 +160,52 @@ export function createMcpServer(bridge: Bridge, bot: BotRow, baseUrl: string): M
       annotations: { idempotentHint: true },
     },
     async (args) => jsonResult(await bridge.markRead(bot, args.msg_ids)),
+  );
+
+  server.registerTool(
+    "get_webhook",
+    {
+      title: "Get webhook",
+      description:
+        "Show this bot's wake-up webhook, if one is saved. Returns the URL, auth scheme, a hint of the sender key, and settings_url. Never returns the sender key. The human should open settings_url to paste or rotate the key. Set refresh_settings true only to invalidate the previous settings URL.",
+      inputSchema: {
+        refresh_settings: z.boolean().optional().describe("Issue a new settings URL and invalidate the previous one."),
+      },
+    },
+    async (args) => jsonResult(await bridge.getWebhook(bot, baseUrl, args.refresh_settings ?? false)),
+  );
+
+  server.registerTool(
+    "set_webhook",
+    {
+      title: "Set webhook",
+      description:
+        "Register or rotate the wake-up webhook for this bot. Prefer the settings_url from get_webhook so the sender key is not pasted into chat. If a key is passed, do not repeat it. The ping body is ids and a timestamp only. The message is read later with check_messages. auth_scheme defaults to bearer.",
+      inputSchema: {
+        url: z.string().describe("https URL from the bot product's webhook routine."),
+        sender_key: z.string().optional().describe("Sender key. Omit to keep the saved key. Do not echo this value."),
+        auth_scheme: z.enum(AUTH_SCHEMES).optional().describe("How to present the sender key. Default bearer."),
+        enabled: z.boolean().optional().describe("Set false to keep the webhook saved but stop pings."),
+      },
+    },
+    async (args) =>
+      jsonResult(
+        await bridge.setWebhook(bot, baseUrl, {
+          url: args.url,
+          senderKey: args.sender_key,
+          authScheme: args.auth_scheme,
+          enabled: args.enabled,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "clear_webhook",
+    {
+      title: "Clear webhook",
+      description: "Remove this bot's wake-up webhook. Later mail stays in the inbox for check_messages. Idempotent when nothing is saved.",
+    },
+    async () => jsonResult(await bridge.clearWebhook(bot, baseUrl)),
   );
 
   server.registerTool(

@@ -1,6 +1,9 @@
 import { cors } from "hono/cors";
 import { Hono } from "hono";
 import { Bridge } from "./bridge.js";
+import type { Scheduler } from "./background.js";
+import type { WebhookTransport } from "./notify/webhook.js";
+import type { DnsLookup } from "./ssrf.js";
 import { createMcpServer } from "./mcp.js";
 import {
   approvalPage,
@@ -12,10 +15,12 @@ import {
   playbookPage,
   registerPage,
   registeredPage,
+  settingsPage,
+  settingsRotatedPage,
 } from "./pages.js";
 import { PLAYBOOK } from "./playbook.js";
 import { safeEqual, sha256 } from "./ids.js";
-import { limitsFromEnv, type Limits } from "./limits.js";
+import { limitsFromEnv, webhookFeatureFromEnv, type Limits, type WebhookFeature } from "./limits.js";
 import { createDefaultStore, type Store } from "./store/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
@@ -28,13 +33,28 @@ export type AppDeps = {
   baseUrl?: string;
   auditToken?: string | null;
   sweepToken?: string | null;
+  webhookDrainToken?: string | null;
+  cronSecret?: string | null;
+  webhooks?: WebhookFeature;
+  lookup?: DnsLookup;
+  postWebhook?: WebhookTransport;
+  schedule?: Scheduler;
   registerPerHour?: number;
 };
 
 export function createApp(deps: AppDeps): Hono {
-  const bridge = new Bridge(deps.store, { now: deps.now, limits: deps.limits });
+  const bridge = new Bridge(deps.store, {
+    now: deps.now,
+    limits: deps.limits,
+    webhooks: deps.webhooks,
+    lookup: deps.lookup,
+    postWebhook: deps.postWebhook,
+    schedule: deps.schedule,
+  });
   const auditToken = deps.auditToken !== undefined ? deps.auditToken : process.env.AUDIT_TOKEN?.trim() || null;
   const sweepToken = deps.sweepToken !== undefined ? deps.sweepToken : process.env.SWEEP_TOKEN?.trim() || null;
+  const webhookDrainToken = deps.webhookDrainToken !== undefined ? deps.webhookDrainToken : process.env.WEBHOOK_DRAIN_TOKEN?.trim() || null;
+  const cronSecret = deps.cronSecret !== undefined ? deps.cronSecret : process.env.CRON_SECRET?.trim() || null;
   const registerPerHour = deps.registerPerHour ?? 30;
   const app = new Hono();
 
@@ -162,6 +182,62 @@ export function createApp(deps: AppDeps): Hono {
       return c.json({ error: "unauthenticated", message: "Sweep token required." }, 401);
     }
     return c.json(await bridge.sweep());
+  });
+
+  const drain = async (c: { req: { header: (name: string) => string | undefined }; json: (body: unknown, status?: number) => Response }) => {
+    if (!webhookDrainToken && !cronSecret) return c.json({ error: "not_found", message: "Webhook drain is disabled." }, 404);
+    const header = c.req.header("authorization");
+    const allowed =
+      (webhookDrainToken != null && bearerMatches(header, webhookDrainToken)) ||
+      (cronSecret != null && bearerMatches(header, cronSecret));
+    if (!allowed) return c.json({ error: "unauthenticated", message: "Drain token required." }, 401);
+    return c.json(await bridge.drain());
+  };
+  app.get("/internal/webhook-drain", drain);
+  app.post("/internal/webhook-drain", drain);
+
+  app.get("/settings/:token", async (c) => html(c, settingsPage(await bridge.settingsView(c.req.param("token"), base(c, deps.baseUrl)))));
+
+  app.post("/settings/:token", async (c) => {
+    const token = c.req.param("token");
+    const origin = base(c, deps.baseUrl);
+    const body = await readObject(c);
+    if (!body.ok) {
+      if (wantsJson(c)) return c.json({ error: "invalid_input", message: body.message }, 400);
+      return html(c, settingsPage(await bridge.settingsView(token, origin), body.message), 400);
+    }
+    const action = stringField(body.value, "action") ?? "save";
+    if (action === "rotate") {
+      const rotated = await bridge.rotateSettings(token, origin);
+      if (!rotated.ok) {
+        if (wantsJson(c)) return c.json({ error: rotated.error, message: rotated.message }, statusFor(rotated.error));
+        return html(c, settingsPage(await bridge.settingsView(token, origin), rotated.message), statusFor(rotated.error));
+      }
+      if (wantsJson(c)) return c.json(rotated.data);
+      return html(c, settingsRotatedPage(rotated.data.settings_url));
+    }
+    if (action === "remove") {
+      const removed = await bridge.removeSettings(token, origin);
+      if (!removed.ok) {
+        if (wantsJson(c)) return c.json({ error: removed.error, message: removed.message }, statusFor(removed.error));
+        return html(c, settingsPage(await bridge.settingsView(token, origin), removed.message), statusFor(removed.error));
+      }
+      if (wantsJson(c)) return c.json(removed.data);
+      return html(c, settingsPage(removed.data));
+    }
+    const saved = await bridge.saveSettings(token, origin, {
+      url: stringField(body.value, "url"),
+      senderKey: stringField(body.value, "sender_key"),
+      authScheme: stringField(body.value, "auth_scheme"),
+      enabled: enabledField(body.value.enabled),
+    });
+    if (!saved.ok) {
+      if (wantsJson(c)) return c.json({ error: saved.error, message: saved.message, ...saved.details }, statusFor(saved.error));
+      const view = await bridge.settingsView(token, origin);
+      return html(c, settingsPage(view, saved.message), statusFor(saved.error));
+    }
+    if (wantsJson(c)) return c.json(saved.data);
+    return html(c, settingsPage(saved.data));
   });
 
   app.on(["GET", "DELETE"], "/mcp", (c) => methodNotAllowed(c));
@@ -305,6 +381,11 @@ function stringField(body: Record<string, unknown>, key: string): string | undef
   return typeof value === "string" ? value : undefined;
 }
 
+function enabledField(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === true || value === "true" || value === "on" || value === "yes";
+}
+
 function tokenFromHeader(authorization: string | undefined, alt: string | undefined): string | null {
   if (authorization?.toLowerCase().startsWith("bearer ")) {
     const token = authorization.slice(7).trim();
@@ -341,6 +422,10 @@ export function getApp(): Promise<Hono> {
 }
 
 async function createDefaultApp(): Promise<Hono> {
+  const webhooks = webhookFeatureFromEnv();
+  if (process.env.VERCEL && webhooks.enabled && !webhooks.kek) {
+    throw new Error("WEBHOOK_KEK is required when WEBHOOKS_ENABLED=1.");
+  }
   const store = await createDefaultStore();
-  return createApp({ store, limits: limitsFromEnv() });
+  return createApp({ store, limits: limitsFromEnv(), webhooks });
 }

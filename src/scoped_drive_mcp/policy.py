@@ -33,6 +33,9 @@ VIEWER_TOOLS: frozenset[str] = frozenset(
         "check_messages",
         "reply",
         "mark_read",
+        "get_webhook",
+        "set_webhook",
+        "clear_webhook",
     }
 )
 EDITOR_TOOLS: frozenset[str] = VIEWER_TOOLS | {

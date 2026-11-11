@@ -1,4 +1,4 @@
-import type { ApprovalView, ManageView } from "./bridge.js";
+import type { ApprovalView, ManageView, SettingsView } from "./bridge.js";
 import { PLAYBOOK } from "./playbook.js";
 
 export function esc(value: string): string {
@@ -58,7 +58,7 @@ function page(title: string, body: string): string {
       border-radius: 10px;
     }
     label { display: block; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.92rem; margin: 0.8rem 0 0.3rem; }
-    input[type="text"], input[type="email"] {
+    input[type="text"], input[type="email"], input[type="url"], input[type="password"], select {
       width: 100%;
       font: inherit;
       padding: 0.55rem 0.65rem;
@@ -248,6 +248,77 @@ export function manageDonePage(purged: number): string {
   return page(
     "Pairing revoked",
     `<h1>Pairing revoked</h1><p>Both bots have lost send and receive on this link.${purged > 0 ? ` ${purged} message${purged === 1 ? "" : "s"} deleted.` : " Stored messages stay hidden and expire on their own."}</p>`,
+  );
+}
+
+export function settingsPage(view: SettingsView, error?: string): string {
+  if (view.state === "invalid") {
+    return page(
+      "Webhook settings",
+      `<h1>This settings link is not valid</h1><p>Ask your bot to call <code>get_webhook</code> and open the <code>settings_url</code> it returns.</p>`,
+    );
+  }
+  if (view.state === "disabled") {
+    return page(
+      "Webhook settings",
+      `<h1>Wake-ups are off</h1><p>This server is not accepting webhook registrations. Mail is still available when your bot calls <code>check_messages</code>.</p>`,
+    );
+  }
+  const enabledDefault = view.configured ? view.enabled : true;
+  const schemes = ["bearer", "bearer_and_x_automation_key", "hmac_sha256", "bearer_and_hmac"] as const;
+  const schemeOptions = schemes
+    .map((scheme) => `<option value="${scheme}"${view.auth_scheme === scheme ? " selected" : ""}>${scheme}</option>`)
+    .join("");
+  const delivery = view.last_delivery
+    ? `<p>Last delivery: ${esc(view.last_delivery.status)}, attempts ${view.last_delivery.attempts}${
+        view.last_delivery.last_status_code == null ? "" : `, HTTP ${view.last_delivery.last_status_code}`
+      }${view.last_delivery.last_error ? `, ${esc(view.last_delivery.last_error)}` : ""}.</p>`
+    : "<p>No delivery yet.</p>";
+  return page(
+    "Webhook settings",
+    `<h1>Wake-up webhook</h1>
+    ${error ? `<p class="error">${esc(error)}</p>` : ""}
+    <p>Paste the <strong>POST to</strong> URL and the <strong>key</strong> from your Grok Bot routine. Bot Bridge sends ids and a timestamp when mail arrives. The message text stays in the mailbox until your bot calls <code>check_messages</code>.</p>
+    <div class="card">
+      <dl>
+        <dt>You</dt><dd>${esc(view.display_name)}</dd>
+        <dt>Saved</dt><dd>${view.configured ? "Yes" : "No"}</dd>
+        <dt>Enabled</dt><dd>${view.enabled ? "Yes" : "No"}</dd>
+        <dt>Key hint</dt><dd>${view.secret_hint ? esc(view.secret_hint) : "None"}</dd>
+        ${view.last_error ? `<dt>Last error</dt><dd>${esc(view.last_error)}</dd>` : ""}
+      </dl>
+      ${delivery}
+    </div>
+    <form method="post">
+      <input type="hidden" name="action" value="save">
+      <label for="url">Webhook URL</label>
+      <input id="url" name="url" type="url" required value="${esc(view.url ?? "")}" autocomplete="off" spellcheck="false">
+      <label for="sender_key">Sender key</label>
+      <input id="sender_key" name="sender_key" type="password" autocomplete="off" placeholder="${view.secret_hint ? "Leave blank to keep the saved key" : "Required the first time"}">
+      <label for="auth_scheme">Auth scheme</label>
+      <select id="auth_scheme" name="auth_scheme">${schemeOptions}</select>
+      <label for="enabled">Enabled</label>
+      <select id="enabled" name="enabled">
+        <option value="true"${enabledDefault ? " selected" : ""}>Yes</option>
+        <option value="false"${enabledDefault ? "" : " selected"}>No</option>
+      </select>
+      <div class="actions"><button class="primary" type="submit">Save webhook</button></div>
+    </form>
+    <form method="post">
+      <input type="hidden" name="action" value="remove">
+      <div class="actions"><button class="quiet" type="submit">Remove webhook</button></div>
+    </form>
+    <form method="post">
+      <input type="hidden" name="action" value="rotate">
+      <div class="actions"><button class="quiet" type="submit">Rotate this settings link</button></div>
+    </form>`,
+  );
+}
+
+export function settingsRotatedPage(url: string): string {
+  return page(
+    "Settings link rotated",
+    `<h1>New settings link</h1><p>The previous link no longer works. Bookmark this one.</p><pre>${esc(url)}</pre>`,
   );
 }
 

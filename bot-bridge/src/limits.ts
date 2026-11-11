@@ -29,3 +29,33 @@ export function limitsFromEnv(env: NodeJS.ProcessEnv = process.env): Limits {
 }
 
 export const HOUR = HOUR_MS;
+
+export type WebhookFeature = {
+  enabled: boolean;
+  kek: Buffer | null;
+  allowlist: string[];
+  maxPerBotPerHour: number;
+  attemptTimeoutMs: number;
+  maxAttempts: number;
+};
+
+export function webhookFeatureFromEnv(env: NodeJS.ProcessEnv = process.env): WebhookFeature {
+  const kekRaw = env.WEBHOOK_KEK?.trim() ?? "";
+  const kek = kekRaw ? Buffer.from(kekRaw, "base64") : null;
+  const allowlistRaw = env.WEBHOOK_HOST_ALLOWLIST;
+  const allowlist =
+    allowlistRaw == null
+      ? ["api2.cursor.sh"]
+      : allowlistRaw
+          .split(",")
+          .map((host) => host.trim().toLowerCase())
+          .filter((host) => host.length > 0);
+  return {
+    enabled: env.WEBHOOKS_ENABLED === "1",
+    kek: kek && kek.length === 32 ? kek : null,
+    allowlist,
+    maxPerBotPerHour: intEnv(env.WEBHOOK_MAX_PER_BOT_PER_HOUR, 60),
+    attemptTimeoutMs: intEnv(env.WEBHOOK_ATTEMPT_TIMEOUT_MS, 4000),
+    maxAttempts: intEnv(env.WEBHOOK_MAX_ATTEMPTS, 5),
+  };
+}

@@ -8,6 +8,7 @@ written and wrapped as untrusted data when a tool reads them.
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 import threading
@@ -18,6 +19,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from .store import KeyValueStore, parse_inbox_token
+from .wake import SCHEMES, WakeSettings, approve_url, deliver, hint, seal
 
 HOUR = 3600
 DAY = 24 * HOUR
@@ -88,12 +90,14 @@ class Mailbox:
         base_url: str = "",
         clock: Any = None,
         encryption_key: str | None = None,
+        wake: WakeSettings | None = None,
     ) -> None:
         self.store = store
         self.base_url = base_url.rstrip("/")
         self.clock = clock or time.time
         self._lock = threading.Lock()
         self._fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
+        self.wake = wake or WakeSettings()
 
     def request_link(self, email: str, invite_code: str | None = None) -> dict[str, Any]:
         you = _email(email)
@@ -344,6 +348,152 @@ class Mailbox:
         self.store.hset(f"bridge:user:{you}", link_id, link["created_at"])
         return self._public_link(link, you)
 
+    def get_webhook(self, email: str) -> dict[str, Any]:
+        you = _email(email)
+        if not self.wake.ready:
+            return {"available": False, "configured": False, "enabled": False}
+        record = self._hook(you)
+        if record is None:
+            return {
+                "available": True,
+                "configured": False,
+                "enabled": False,
+                "url": None,
+                "auth_scheme": None,
+                "secret_hint": None,
+                "last_error": None,
+            }
+        return {
+            "available": True,
+            "configured": True,
+            "enabled": bool(record.get("enabled")),
+            "url": record.get("url"),
+            "auth_scheme": record.get("scheme"),
+            "secret_hint": record.get("hint"),
+            "last_error": self.store.get(f"bridge:hookerr:{you}"),
+        }
+
+    def set_webhook(
+        self,
+        email: str,
+        url: str,
+        sender_key: str | None = None,
+        auth_scheme: str = "bearer",
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        you = _email(email)
+        if not self.wake.ready:
+            raise MailboxError(
+                "webhook_disabled", "Webhook wake-ups are turned off on this server."
+            )
+        scheme = (auth_scheme or "bearer").strip()
+        if scheme not in SCHEMES:
+            raise MailboxError(
+                "invalid_input",
+                "auth_scheme must be bearer or bearer_and_x_automation_key.",
+            )
+        try:
+            approve_url(url, self.wake.allowlist, self.wake.lookup)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "webhook_host_not_allowed":
+                raise MailboxError(
+                    "webhook_host_not_allowed",
+                    "That webhook host is not on the allowlist.",
+                ) from None
+            raise MailboxError(
+                "invalid_webhook_url",
+                "Use an https URL on an allowlisted host, with no user, query, or fragment.",
+            ) from None
+        except OSError:
+            raise MailboxError(
+                "invalid_webhook_url",
+                "That webhook host did not resolve to a public address.",
+            ) from None
+        current = self._hook(you) or {}
+        key = (sender_key or "").strip()
+        if key:
+            ciphertext, nonce = seal(key, self.wake.kek or b"")
+            saved_hint = hint(key)
+        else:
+            ciphertext = current.get("ciphertext")
+            nonce = current.get("nonce")
+            saved_hint = current.get("hint")
+        if not ciphertext or not nonce:
+            raise MailboxError(
+                "secret_required",
+                "A sender key is required the first time you save a webhook.",
+            )
+        record = {
+            "url": url.strip(),
+            "scheme": scheme,
+            "ciphertext": ciphertext,
+            "nonce": nonce,
+            "hint": saved_hint,
+            "enabled": current.get("enabled", True) if enabled is None else bool(enabled),
+        }
+        self.store.set(f"bridge:hook:{you}", json.dumps(record))
+        self.store.delete(f"bridge:hookerr:{you}")
+        return self.get_webhook(you)
+
+    def clear_webhook(self, email: str) -> dict[str, Any]:
+        you = _email(email)
+        if not self.wake.ready:
+            raise MailboxError(
+                "webhook_disabled", "Webhook wake-ups are turned off on this server."
+            )
+        self.store.delete(f"bridge:hook:{you}")
+        self.store.delete(f"bridge:hookerr:{you}")
+        return self.get_webhook(you)
+
+    def _hook(self, email: str) -> dict[str, Any] | None:
+        raw = self.store.get(f"bridge:hook:{email}")
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _maybe_wake(self, message: dict[str, Any]) -> None:
+        if not self.wake.ready:
+            return
+        record = self._hook(str(message["to"]))
+        if not record or not record.get("enabled") or not record.get("url"):
+            return
+        mark = f"bridge:woke:{message['msg_id']}"
+        if not self.store.set_if_absent(mark, "1", ex=MESSAGE_TTL):
+            return
+        recipient = str(message["to"])
+        try:
+            deliver(self.wake, record, message)
+        except Exception as exc:
+            self.store.delete(mark)
+            logged = _wake_error(exc)
+            logging.getLogger(__name__).warning("mailbox_wake_failed %s", logged)
+            self._note_wake(recipient, record, logged)
+        else:
+            self._note_wake(recipient, record, None)
+
+    def _note_wake(self, email: str, used: dict[str, Any], error: str | None) -> None:
+        """Record the outcome only while the saved webhook is still the one we called."""
+        current = self._hook(email)
+        if current is None:
+            return
+        same = (
+            current.get("url") == used.get("url")
+            and current.get("ciphertext") == used.get("ciphertext")
+            and current.get("nonce") == used.get("nonce")
+        )
+        if not same:
+            return
+        key = f"bridge:hookerr:{email}"
+        if error is None:
+            self.store.delete(key)
+        else:
+            self.store.set(key, error, ex=MESSAGE_TTL)
+
     def _deliver(
         self,
         you: str,
@@ -507,6 +657,7 @@ class Mailbox:
         self._push_once(f"bridge:linkmsgs:{link_id}", message["msg_id"], message["msg_id"])
         thread_key = f"bridge:threadmsgs:{link_id}:{thread}"
         self._push_once(thread_key, message["msg_id"], message["msg_id"])
+        self._maybe_wake(message)
 
     def _push_once(self, key: str, msg_id: str, value: str) -> None:
         """Queue `value` unless this list already has `msg_id`. The mark follows the push."""
@@ -834,6 +985,15 @@ def _parties(link: dict[str, Any], peer: str | None) -> set[str]:
     if peer:
         found.add(peer)
     return found
+
+
+def _wake_error(exc: Exception) -> str:
+    detail = exc.args[0] if exc.args else ""
+    if isinstance(detail, str) and detail.startswith("http_"):
+        return "http_status"
+    if isinstance(detail, str) and detail.isidentifier():
+        return detail[:80]
+    return type(exc).__name__
 
 
 def _sent(message: dict[str, Any], replay: bool) -> dict[str, Any]:

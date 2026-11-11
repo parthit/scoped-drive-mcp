@@ -238,6 +238,9 @@ def test_preshared_api_token_is_not_an_oauth_lookup(world, p2_settings, oauth) -
         "check_messages",
         "reply",
         "mark_read",
+        "get_webhook",
+        "set_webhook",
+        "clear_webhook",
     }
     assert "trash_file" not in names
     assert spy.oauth_ops == 0
@@ -437,7 +440,7 @@ def test_pkce_and_redirect_mismatch_fail_and_code_is_single_use(owner_c, memstor
     assert hash_in(access) in stored
 
     names = tool_names(owner_c, access)
-    assert len(names) == 19
+    assert len(names) == 22
     assert "trash_file" in names
     dashboard = owner_c.get("/", headers={"Authorization": f"Bearer {access}"})
     assert dashboard.status_code == 200
