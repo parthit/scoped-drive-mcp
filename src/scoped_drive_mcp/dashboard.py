@@ -21,6 +21,7 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import date
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -288,6 +289,18 @@ async def blocking[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 WAKE_HOME = "/settings#assistants"
 LIST_FIELDS = OWNER_FIELDS + ",modifiedTime"
 COVER_CHECK_LIMIT = 25
+
+
+def _end_of_day(day: str) -> str | None:
+    """A date from the Sharing form ("2026-12-31") as the last second of that day, UTC,
+    in the same ISO form as utc_now() so the two compare as strings."""
+    day = day.strip()
+    if not day:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise ValueError(day)
+    date.fromisoformat(day)
+    return f"{day}T23:59:59+00:00"
 
 
 def _dupes(rows: list[dict[str, Any]]) -> set[str]:
@@ -1509,6 +1522,37 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             next_url,
         )
 
+    async def share_audience(request: Request, form: dict[str, str]) -> Response:
+        """Who may read one item on the Sharing list, and until when."""
+        file_id = validate_drive_id(form.get("file_id"))
+        next_url = safe_next(form.get("next") or "/sharing?tab=by-me")
+        email = str(request.session.get("owner") or "")
+        chosen = [str(v) for v in (await request.form()).getlist("person")]
+        try:
+            expires_at = _end_of_day(form.get("expires_on") or "")
+        except ValueError:
+            return action_done(
+                request, "error", "Pick a valid end date, or leave it empty.", next_url
+            )
+        peers = await blocking(ctx.mailbox.active_peers, email) if ctx.mailbox else []
+        if form.get("who") == "people":
+            # Only people you are paired with now can be named.
+            people = tuple(p for p in peers if p in {c.strip().lower() for c in chosen})
+            audience: str | tuple[str, ...] = people
+        else:
+            audience = AUDIENCE_LINKED
+        try:
+            entry = await blocking(ctx.ext_grants().set_audience, file_id, audience, expires_at)
+        except GrantError as exc:
+            return action_done(request, "error", str(exc), next_url)
+        who = (
+            "everyone you are paired with" if entry.for_everyone else ", ".join(entry.audience)  # type: ignore[arg-type]
+        )
+        until = f" until {entry.expires_at[:10]}" if entry.expires_at else ""
+        return action_done(
+            request, "ok", f"“{entry.name}” is now shared with {who}{until}.", next_url
+        )
+
     async def share_remove(request: Request, form: dict[str, str]) -> Response:
         file_id = validate_drive_id(form.get("file_id"))
         next_url = safe_next(form.get("next") or "/sharing")
@@ -1801,7 +1845,8 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
             return None
         for peer in ctx.mailbox.active_peers(me):
             store = ctx.directory.store_for(peer)
-            if Allowlist(store, EXTERNAL_ALLOWLIST_KEY).get(file_id) is not None:
+            entry = Allowlist(store, EXTERNAL_ALLOWLIST_KEY).get(file_id)
+            if entry is not None and entry.readable_by(me):
                 return peer
         return None
 
@@ -2192,11 +2237,18 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         ext = ctx.ext_allowlist
         data["sharing_on"] = ext is not None
         data["shared_items"] = []
+        data["visible_to"] = {}
         if ext is not None:
             entries = await blocking(ext.entries)
-            data["shared_items"] = sorted(
-                entries.values(), key=lambda e: e.granted_at, reverse=True
-            )
+            ordered = sorted(entries.values(), key=lambda e: e.granted_at, reverse=True)
+            # A new person is never named on an item yet: approving shows them only what
+            # is shared with everyone paired.
+            data["shared_items"] = [e for e in ordered if e.for_everyone and not e.expired()]
+            # Each person you share with: exactly what their assistant can read now.
+            for link in data["links"]:
+                peer = link.get("peer_email")
+                if peer and not link.get("same_account"):
+                    data["visible_to"][peer] = [e for e in ordered if e.readable_by(peer)]
         return render(request, "bridge.html", tab="people", **data)
 
     async def settings_page(request: Request) -> Response:
@@ -2449,6 +2501,7 @@ def build_dashboard(ctx: DashboardContext) -> Starlette:
         Route("/settings", owner_only(settings_page), methods=["GET"]),
         Route("/sharing/add", csrf_protected(share_add), methods=["POST"]),
         Route("/sharing/remove", csrf_protected(share_remove), methods=["POST"]),
+        Route("/sharing/audience", csrf_protected(share_audience), methods=["POST"]),
         Route("/shared", moved("/sharing", tab="with-me"), methods=["GET"]),
         Route("/shared/search", owner_only(shared_search), methods=["GET"]),
         Route("/shared/browse", owner_only(shared_browse), methods=["GET"]),

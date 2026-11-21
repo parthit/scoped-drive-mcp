@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from typing import Any, TypeVar
 
 from .audit import audit
-from .auth import current_actor
+from .auth import current_actor, current_guest
 from .drive_client import FOLDER_MIME, BotNotConnectedError
 from .errors import report_exception
 from .scope import ForbiddenError, InvalidInputError, OutOfScopeError
@@ -131,6 +131,18 @@ def acting_as(email: str) -> Iterator[None]:
         current_actor.reset(token)
 
 
+@contextmanager
+def guest_of(owner: str, guest: str) -> Iterator[None]:
+    """Act as `owner` while `guest` reads their Sharing list: the guard then sees only
+    the items shared with everyone paired or with `guest` by name."""
+    token = current_guest.set(guest)
+    try:
+        with acting_as(owner):
+            yield
+    finally:
+        current_guest.reset(token)
+
+
 class ExternalShares:
     def __init__(
         self,
@@ -159,8 +171,8 @@ class ExternalShares:
         you = normalize_email(caller)
         people: list[dict[str, Any]] = []
         for peer in self.active_peers(you):
-            with acting_as(peer):
-                entries = self.allowlist.entries()
+            with guest_of(peer, you):
+                entries = self.allowlist.entries_for(you)
             if not entries:
                 continue
             items = [
@@ -235,8 +247,8 @@ class ExternalShares:
         reported as unavailable."""
         peers = []
         for peer in self.active_peers(you):
-            with acting_as(peer):
-                if self.allowlist.entries():
+            with guest_of(peer, you):
+                if self.allowlist.entries_for(you):
                     peers.append(peer)
         return peers
 
@@ -254,7 +266,7 @@ class ExternalShares:
         for peer in self._sharing_peers(you):
             if peer == you:
                 continue
-            with acting_as(peer):
+            with guest_of(peer, you):
                 try:
                     if self.service.guard.is_in_scope(file_id):
                         return peer
@@ -272,7 +284,7 @@ class ExternalShares:
         # through the guard: the current name must still match and it must not be trashed.
         needle = text.casefold()
         hits: list[dict[str, Any]] = []
-        for entry in self.allowlist.entries().values():
+        for entry in self.allowlist.entries_for(current_guest.get()).values():
             if len(hits) >= limit:
                 break
             if entry.mime_type != FOLDER_MIME or needle not in entry.name.casefold():
@@ -373,7 +385,7 @@ class ExternalShares:
         }
         if via:
             who["via"] = via
-        with acting_as(them):
+        with guest_of(them, you):
             try:
                 result = fn()
             except (OutOfScopeError, ForbiddenError):

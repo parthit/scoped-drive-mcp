@@ -142,6 +142,9 @@ class Mailbox:
         self._lock = threading.Lock()
         self._fernet = Fernet(encryption_key.strip().encode()) if encryption_key else None
         self.wake = wake or WakeSettings()
+        # Called with (a, b) when two people stop being paired, so each person's Sharing
+        # list stops naming the other: re-pairing later must not bring that access back.
+        self.on_unpaired: Callable[[str, str], None] | None = None
 
     def request_link(
         self, email: str, invite_code: str | None = None, new_invite: bool = False
@@ -1474,6 +1477,18 @@ class Mailbox:
         record = json.dumps({"by": you, "at": at, "how": how})
         self.store.set_if_absent(f"bridge:ended:{link['link_id']}", record, ex=PEER_TTL)
         self.store.set(f"bridge:revoked:{link['link_id']}", at)
+        peer = self._peer(link["link_id"])
+        if self.on_unpaired is None or link.get("same_account") or not peer:
+            return
+        a = str(link["email_a"])
+        if self.is_linked(a, peer):
+            return  # another pairing between the same two people is still on
+        try:
+            self.on_unpaired(a, peer)
+        except Exception:
+            # The pairing is already off, which ends access on its own. A person named on
+            # an item stays named; they still read nothing until a pairing is approved.
+            logging.getLogger(__name__).warning("unpair_prune_failed", exc_info=True)
 
     def _ended(self, link_id: str) -> dict[str, Any] | None:
         raw = self.store.get(f"bridge:ended:{link_id}")
@@ -1518,7 +1533,12 @@ class Mailbox:
         # Mail between two people from before it was turned off: never shown, and deleted
         # for both people the first time either inbox is read.
         for stale in sorted(peer_links):
-            self._purge(stale)
+            try:
+                self._purge(stale)
+            except Exception:
+                # Clean-up only: the mail is already hidden, so a failed delete must never
+                # turn a read into an error. The next read tries again.
+                logging.getLogger(__name__).warning("peer_mail_purge_failed", exc_info=True)
         rows.sort(key=lambda row: row["created"], reverse=True)
         return rows
 

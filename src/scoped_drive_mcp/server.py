@@ -31,7 +31,14 @@ from starlette.types import Receive, Scope, Send
 
 from . import audit as audit_module
 from .access import AccessRequests, AccessService
-from .auth import BearerAuthMiddleware, current_principal
+from .audit import audit_owner
+from .auth import (
+    BearerAuthMiddleware,
+    current_actor,
+    current_guest,
+    current_principal,
+    guest_partition,
+)
 from .bridge import Assistant, Mailbox, MailboxError, as_assistant
 from .config import Settings
 from .dashboard import DashboardContext, build_dashboard, legal_routes, render_plain
@@ -47,7 +54,7 @@ from .drive_client import (
     drive_not_connected_message,
     oauth_credentials,
 )
-from .external import ExternalShares, SharedAccessError
+from .external import ExternalShares, SharedAccessError, acting_as
 from .flags import EdgeConfigFlags
 from .mcp_oauth import McpOAuth, protected_resource_metadata_url
 from .oauth import GoogleOAuthClient, OAuthClient
@@ -724,10 +731,32 @@ def build_app(
         routed,
         None,
         ttl=settings.scope_cache_ttl,
-        allowlist=ext_allowlist.mime_map,
+        # Only what this guest may read: shared with everyone paired, or with them by
+        # name, and not expired. Cached per (owner, guest).
+        allowlist=lambda: ext_allowlist.mime_map_for(current_guest.get()),
         allowlist_ttl=settings.allowlist_cache_ttl,
         admin_email=settings.owner_email,
+        partition=lambda: guest_partition(current_actor.get(), current_guest.get()),
     )
+
+    def forget_each_other(a: str, b: str) -> None:
+        """Two people are no longer paired: neither Sharing list names the other any more,
+        so approving a new pairing later starts from what is shared with everyone."""
+        failed = None
+        for owner, guest in ((a, b), (b, a)):
+            # Each side on its own: one failing must not leave the other side's names.
+            try:
+                with acting_as(owner):
+                    changed = ext_allowlist.forget_person(guest)
+                    if changed:
+                        ext_guard.invalidate_allowlist()
+                        audit_owner("share_unpaired", count=str(len(changed)))
+            except Exception as exc:  # noqa: BLE001 - re-raised below, after both sides
+                failed = exc
+        if failed is not None:
+            raise failed
+
+    mailbox.on_unpaired = forget_each_other
     shares = ExternalShares(
         ext_allowlist,
         DriveService(routed, ext_guard, settings),

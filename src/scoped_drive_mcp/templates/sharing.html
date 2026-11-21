@@ -10,7 +10,7 @@
   <ul>
     {% for p in peers %}<li><b>{{ p }}</b></li>{% endfor %}
   </ul>
-  <p class="muted">Their assistants can read, list and download these items, never change them. Disconnecting a pairing on the People tab stops that at once.</p>
+  <p class="muted">Each item says who can see it: everyone you are paired with, or only the people you pick. Their assistants can read, list and download it, never change it. Disconnecting a pairing on the People tab stops that at once.</p>
   {% elif rows %}
   <p>No one right now. You have no active pairing, so no other assistant can read these items. Anyone you pair with later on <a href="/sharing?tab=people">People</a> will be able to.</p>
   {% else %}
@@ -20,12 +20,37 @@
 
 {% if rows %}
 <table class="cards" data-list>
-  <thead><tr><th>Name</th><th>Type</th><th>Shared</th><th>Action</th></tr></thead>
+  <thead><tr><th>Name</th><th>Type</th><th>Who can see it</th><th>Shared</th><th>Action</th></tr></thead>
   <tbody>
   {% for e in rows %}
   <tr data-row>
     <td data-label="Name">{% if e.mime_type == "application/vnd.google-apps.folder" %}<a href="/files?folder={{ e.id | urlencode }}">{{ e.name or e.id }}</a>{% else %}{{ e.name or e.id }}{% endif %}</td>
     <td data-label="Type">{{ describe_mime(e.mime_type) }}</td>
+    <td data-label="Who can see it">
+      {% if e.for_everyone %}Everyone you are paired with{% elif e.audience %}{{ e.audience | join(", ") }}{% else %}<b>No one</b> <span class="muted">(the people it named are no longer paired with you)</span>{% endif %}
+      {% if e.expires_at %}<br><span class="muted">{{ "Ended" if e.expired() else "Until" }} {{ e.expires_at[:10] }}</span>{% endif %}
+      {% if peers %}
+      <details class="disclosure-form" id="who-{{ e.id }}"><summary>Change<span class="sr-only"> who can see {{ e.name or e.id }}</span></summary>
+        <form class="stack" method="post" action="/sharing/audience">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="file_id" value="{{ e.id }}">
+          <input type="hidden" name="next" value="/sharing?tab=by-me">
+          <fieldset>
+            <legend class="sr-only">Who can see it</legend>
+            <label><input type="radio" name="who" value="everyone"{% if e.for_everyone %} checked{% endif %}> Everyone you are paired with, now and later</label>
+            <label><input type="radio" name="who" value="people"{% if not e.for_everyone %} checked{% endif %}> Only these people:</label>
+            {% for p in peers %}
+            <label class="indent"><input type="checkbox" name="person" value="{{ p }}"{% if not e.for_everyone and p in e.audience %} checked{% endif %}> {{ p }}</label>
+            {% endfor %}
+          </fieldset>
+          <label>Stop sharing after (optional)
+            <input type="date" name="expires_on" value="{{ e.expires_at[:10] if e.expires_at else '' }}">
+          </label>
+          <div class="actions"><button type="submit">Save</button></div>
+        </form>
+      </details>
+      {% endif %}
+    </td>
     <td data-label="Shared" class="muted">{{ e.granted_at | when }}</td>
     <td data-label="Action">
       <form class="inline" method="post" action="/sharing/remove" data-async data-on-success="remove-row" data-confirm="Stop sharing this with other people’s assistants?">

@@ -35,7 +35,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .auth import current_actor
+from .auth import GUEST_PARTITION_SEP, current_actor
 from .drive_client import FOLDER_MIME, DriveClient, DriveNotFoundError
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
@@ -135,8 +135,12 @@ class ScopeGuard:
         max_folders: int = 5000,
         parents_chunk_size: int = 40,
         max_individual_files: int = 200,
+        partition: Callable[[], str] | None = None,
     ):
         self.drive = drive
+        # Which cache a call uses. Default: the actor. The guest guard partitions by
+        # (owner, guest) too, since each guest may see a different part of the list.
+        self._partition = partition
         self.root_id = root_folder_id
         self.ttl = ttl
         self.allowlist_source = allowlist
@@ -157,7 +161,18 @@ class ScopeGuard:
         self._allowed: dict[str, tuple[float, dict[str, str]]] = {}
 
     def _who(self) -> str:
+        if self._partition is not None:
+            return self._partition()
         return current_actor.get() or ""
+
+    def _owned_keys(self, cache: dict[str, Any]) -> list[str]:
+        """Every cache key of the current actor: with partitions, all of its guests."""
+        who = self._who()
+        if self._partition is None:
+            return [who]
+        actor = current_actor.get() or ""
+        prefix = actor + GUEST_PARTITION_SEP
+        return [key for key in cache if key == who or key.startswith(prefix)]
 
     # ---- allowlist -----------------------------------------------------
 
@@ -197,10 +212,11 @@ class ScopeGuard:
         return items
 
     def invalidate_allowlist(self) -> None:
-        who = self._who()
         with self._lock:
-            self._allowed.pop(who, None)
-            self._folders.pop(who, None)
+            for key in self._owned_keys(self._allowed):
+                self._allowed.pop(key, None)
+            for key in self._owned_keys(self._folders):
+                self._folders.pop(key, None)
 
     def default_parent(self) -> str | None:
         """Where creates go without a parent_id: the admin's root, else the only folder."""
@@ -239,12 +255,12 @@ class ScopeGuard:
                 bucket[ref.id] = (self._clock() + self.ttl, ref)
 
     def invalidate(self, file_id: str | None = None) -> None:
-        who = self._who()
         with self._lock:
-            bucket = self._ancestors.get(who)
-            if file_id is not None and bucket is not None:
-                bucket.pop(file_id, None)
-            self._folders.pop(who, None)
+            if file_id is not None:
+                for key in self._owned_keys(self._ancestors):
+                    self._ancestors.get(key, {}).pop(file_id, None)
+            for key in self._owned_keys(self._folders):
+                self._folders.pop(key, None)
 
     def resolve(self, file_id: str) -> FileRef:
         """Fetch a file fresh (never cached). Missing files are reported as out of scope."""

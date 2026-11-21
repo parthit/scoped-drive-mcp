@@ -37,8 +37,8 @@ from .external import (
     SKIPPABLE_IN_SEARCH,
     ExternalShares,
     SharedAccessError,
-    acting_as,
     clean_query,
+    guest_of,
     normalize_email,
 )
 from .scope import ForbiddenError, OutOfScopeError
@@ -292,8 +292,8 @@ class DriveSharedSource:
         you, them = normalize_email(caller), normalize_email(owner)
         if you == them or not self.shares.is_linked(you, them):
             return []
-        with acting_as(them):
-            entries = self.shares.allowlist.entries()
+        with guest_of(them, you):
+            entries = self.shares.allowlist.entries_for(you)
         return _sorted(
             [
                 SharedNode(

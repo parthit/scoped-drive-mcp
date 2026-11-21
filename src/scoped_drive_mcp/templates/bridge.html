@@ -61,8 +61,18 @@
   {% endif %}
 
   {% elif link.status == "active" %}
-  {{ head("ok", "✓", "On", peer) }}
+  {{ head("ok", "✓", "On", "Sharing with " ~ peer) }}
   <p class="muted">{{ link.next_step }}</p>
+  {% if sharing_on %}
+  {%- set mine = visible_to.get(peer, []) %}
+  {% if mine %}
+  <p>{{ peer }}’s assistant can read {{ mine | length }} {{ "item" if mine | length == 1 else "items" }} of yours:
+    {% for e in mine[:5] %}“{{ e.name or e.id }}”{% if not loop.last %}, {% endif %}{% endfor %}{% if mine | length > 5 %}, and {{ mine | length - 5 }} more{% endif %}.
+    <a href="/sharing?tab=by-me">Change</a></p>
+  {% else %}
+  <p class="muted">You share nothing with {{ peer }} right now. <a href="/sharing?tab=by-me">Share something</a></p>
+  {% endif %}
+  {% endif %}
   <form method="post" action="/bridge/{{ link.link_id }}/revoke" data-confirm="Disconnect from {{ peer }}? You will each stop being able to read what the other shares.">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="actions"><button class="danger" type="submit">Disconnect</button></div>
